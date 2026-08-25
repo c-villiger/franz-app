@@ -21,3 +21,13 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+### Französisch-Trainer ###
+# Lokale Fortschritts-Datenbank (pro Gerät, nicht versioniert)
+data/
+*.db
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
