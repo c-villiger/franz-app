@@ -263,7 +263,16 @@ Zwei Zusätze:
 * **Keine Wiederholung** – die zuletzt gezeigte Karte kommt nie direkt noch
   einmal; die davor gezeigten sind stark abgewertet.
 
-Nachzulesen und anzupassen in [`vocabtrainer/scheduler.py`](vocabtrainer/scheduler.py).
+Die Gewichte lassen sich im Dashboard ändern: Seitenleiste →
+**Auswahl-Algorithmus**. Darunter steht, wie oft die nächste Karte dann
+tatsächlich aus jeder Gruppe käme – das hängt nämlich auch daran, wie viele
+Karten in der Gruppe liegen. `0` heisst „gar nicht mehr abfragen"; sind alle
+auf `0`, wird gleichverteilt gezogen, damit die Abfrage nie stehenbleibt.
+
+Gespeichert wird in derselben Datenbank wie der Fortschritt – die Einstellung
+überlebt also einen Neustart und gilt gehostet auf allen Geräten. „Standard"
+stellt die Werte aus [`vocabtrainer/scheduler.py`](vocabtrainer/scheduler.py)
+wieder her.
 
 ---
 

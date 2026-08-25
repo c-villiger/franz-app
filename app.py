@@ -21,7 +21,14 @@ from vocabtrainer.config import (
     ROOT,
     VOCAB_FILE,
 )
-from vocabtrainer.scheduler import pick_card, pick_direction
+from vocabtrainer.scheduler import (
+    BASE_WEIGHT,
+    WEIGHT_ORDER,
+    pick_card,
+    pick_direction,
+    weights_from_json,
+    weights_to_json,
+)
 from vocabtrainer.vocab_file import (
     VocabFileError,
     append_entries,
@@ -165,6 +172,17 @@ def get_conn(url: str, token: str):
 
 
 conn = get_conn(DB_URL, DB_TOKEN)
+
+# Die Gewichte kommen aus der Datenbank, nicht aus der Sitzung: so bleiben sie
+# nach einem Neustart erhalten und gelten gehostet auf allen Geräten.
+WEIGHTS = weights_from_json(dbmod.get_setting(conn, "weights"))
+WEIGHT_LABELS = {
+    None: "⚪️ noch nicht gefragt",
+    "unsicher": "🔴 unsicher",
+    "mittel": "🟡 mittel",
+    "sicher": "🟢 sicher",
+}
+
 ss = st.session_state
 ss.setdefault("current_id", None)
 ss.setdefault("direction", "fr2de")
@@ -183,7 +201,7 @@ def deck() -> list:
 
 def next_card(cards) -> None:
     """Zieht die naechste Karte und setzt die Anzeige zurueck."""
-    card = pick_card(cards, recent_ids=ss.recent, rng=ss.rng)
+    card = pick_card(cards, weights=WEIGHTS, recent_ids=ss.recent, rng=ss.rng)
     ss.current_id = card.id if card else None
     ss.direction = pick_direction(ss.mode, ss.rng)
     ss.revealed = False
@@ -196,6 +214,16 @@ def rate(card_id: int, label: str, cards) -> None:
     ss.session_count += 1
     ss.flash = f"{LABEL_EMOJI[label]} als *{label}* gespeichert"
     next_card(cards)
+
+
+# Zähler pro Gruppe, für die Anteilsanzeige im Einstellbereich.
+_counts = dbmod.stats(conn)
+counts_for_weights = {
+    None: _counts["unseen"],
+    "unsicher": _counts["unsicher"],
+    "mittel": _counts["mittel"],
+    "sicher": _counts["sicher"],
+}
 
 
 # ---------------------------------------------------------------- Seitenleiste
@@ -273,6 +301,53 @@ with st.sidebar:
                     st.info(dbmod.sync_from_file(conn, load_entries()).summary())
             except Exception as exc:  # pragma: no cover - Umgebungsfehler
                 st.error(f"git pull fehlgeschlagen: {exc}")
+
+    st.divider()
+    with st.expander("Auswahl-Algorithmus"):
+        st.caption(
+            "Wie stark eine Gruppe gewichtet wird. Höher = kommt öfter dran. "
+            "0 heisst: gar nicht mehr abfragen."
+        )
+        neu: dict[str | None, float] = {}
+        for label in WEIGHT_ORDER:
+            neu[label] = st.slider(
+                WEIGHT_LABELS[label],
+                min_value=0.0,
+                max_value=30.0,
+                value=float(WEIGHTS[label]),
+                step=0.5,
+                key=f"weight_{label or 'unseen'}",
+            )
+
+        # Rohe Gewichte sagen für sich genommen wenig - entscheidend ist, wie
+        # oft eine Gruppe tatsächlich drankommt. Das hängt auch daran, wie
+        # viele Karten in ihr liegen.
+        anteile = {label: counts_for_weights[label] * neu[label] for label in WEIGHT_ORDER}
+        gesamt = sum(anteile.values())
+        if gesamt > 0:
+            st.caption("So oft käme die nächste Karte aus dieser Gruppe:")
+            for label in WEIGHT_ORDER:
+                if counts_for_weights[label]:
+                    st.caption(
+                        f"  {WEIGHT_LABELS[label]} · {anteile[label] / gesamt * 100:.0f} %"
+                        f"  ({counts_for_weights[label]} Karten)"
+                    )
+        else:
+            st.warning("Alles auf 0 – dann wird gleichverteilt gezogen.")
+
+        c_speichern, c_zurueck = st.columns(2)
+        with c_speichern:
+            if st.button("Speichern", type="primary"):
+                dbmod.set_setting(conn, "weights", weights_to_json(neu))
+                st.rerun()
+        with c_zurueck:
+            if st.button("Standard"):
+                dbmod.delete_setting(conn, "weights")
+                for label in WEIGHT_ORDER:
+                    ss.pop(f"weight_{label or 'unseen'}", None)
+                st.rerun()
+        if neu != WEIGHTS:
+            st.info("Noch nicht gespeichert.")
 
     st.divider()
     with st.expander("Fortschritt zurücksetzen"):

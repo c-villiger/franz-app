@@ -27,6 +27,8 @@ from vocabtrainer.scheduler import (  # noqa: E402
     pick_card,
     pick_direction,
     weight_of,
+    weights_from_json,
+    weights_to_json,
 )
 from vocabtrainer.vocab_file import (  # noqa: E402
     Entry,
@@ -190,6 +192,19 @@ class TestDatabase(TempPaths):
         self.assertEqual(dbmod.all_tags(conn), ["alltag", "idiom"])
         self.assertEqual([c.fr for c in dbmod.all_cards(conn, tags=["idiom"])], ["a"])
 
+    def test_settings_survive_a_restart(self):
+        conn = self.conn_with([Entry("a", "A")])
+        self.assertIsNone(dbmod.get_setting(conn, "weights"))
+        self.assertEqual(dbmod.get_setting(conn, "weights", "fallback"), "fallback")
+        dbmod.set_setting(conn, "weights", '{"sicher": 0.5}')
+        dbmod.set_setting(conn, "weights", '{"sicher": 2.0}')  # überschreiben
+        conn.close()
+
+        conn2 = self.open_conn()
+        self.assertEqual(dbmod.get_setting(conn2, "weights"), '{"sicher": 2.0}')
+        dbmod.delete_setting(conn2, "weights")
+        self.assertIsNone(dbmod.get_setting(conn2, "weights"))
+
     def test_progress_survives_a_restart(self):
         conn = self.conn_with([Entry("a", "A")])
         card = dbmod.all_cards(conn)[0]
@@ -258,6 +273,53 @@ class _VerbindungOhneSpaltennamen:
         self._conn.close()
 
 
+class _CursorMitGrossemSchluesselwort:
+    """Cursor, der Spaltennamen so meldet wie die gehostete Datenbank.
+
+    Turso gab ``key`` als ``KEY`` zurück – es ist ein SQL-Schlüsselwort.
+    Genau daran scheiterte jedes row["key"].
+    """
+
+    def __init__(self, cursor) -> None:
+        self._cursor = cursor
+        self.description = tuple(
+            (str(d[0]).upper() if str(d[0]).lower() == "key" else d[0],) + tuple(d[1:])
+            for d in (cursor.description or ())
+        )
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class _VerbindungMitGrossemSchluesselwort:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql, parameters=()):
+        return _CursorMitGrossemSchluesselwort(self._conn.execute(sql, parameters))
+
+    def executescript(self, script):
+        self._conn.executescript(script)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+class TestDatabaseGrossgeschrieben(TestDatabaseLibsql):
+    """Die gesamte Suite gegen einen Treiber, der `key` als `KEY` meldet."""
+
+    def open_conn(self, path=None):
+        conn = super().open_conn(path)
+        conn._conn = _VerbindungMitGrossemSchluesselwort(conn._conn)
+        return conn
+
+
 class TestDatabaseOhneSpaltennamen(TestDatabaseLibsql):
     """Der Fehler, der erst gegen echtes Turso auftrat.
 
@@ -287,8 +349,18 @@ class TestNamedRow(unittest.TestCase):
         self.assertEqual(self.row[0], "abc")
 
     def test_unknown_column_raises_key_error(self):
-        with self.assertRaises(KeyError):
+        with self.assertRaises(KeyError) as fehler:
             self.row["gibtsnicht"]
+        # Die Meldung muss die vorhandenen Spalten nennen - erst dadurch liess
+        # sich der Turso-Fehler überhaupt einkreisen.
+        self.assertIn("fr", str(fehler.exception))
+
+    def test_lookup_ignores_case(self):
+        # Die gehostete Datenbank meldete "KEY" statt "key".
+        row = dbmod._NamedRow(("x",), {"key": 0})
+        self.assertEqual(row["key"], "x")
+        self.assertEqual(row["KEY"], "x")
+        self.assertEqual(row["Key"], "x")
 
     def test_keys_and_len(self):
         self.assertEqual(self.row.keys(), ["fr", "times_asked", "label"])
@@ -385,6 +457,52 @@ class TestScheduler(unittest.TestCase):
                 repeats += 1
             recent = [card.id, *[i for i in recent if i != card.id]][:12]
         self.assertEqual(repeats, 0)
+
+    def test_custom_weights_change_the_distribution(self):
+        cards = [make_card(i, "sicher") for i in range(5)] + [
+            make_card(100 + i, "unsicher") for i in range(5)
+        ]
+        eigene = {None: 1.0, "unsicher": 1.0, "mittel": 1.0, "sicher": 20.0}
+        rng = random.Random(11)
+        counts = Counter(
+            pick_card(cards, weights=eigene, rng=rng).label for _ in range(2000)
+        )
+        # Umgekehrt zur Voreinstellung: jetzt kommt "sicher" häufiger.
+        self.assertGreater(counts["sicher"], counts["unsicher"])
+
+    def test_weight_zero_excludes_a_group(self):
+        cards = [make_card(i, "sicher") for i in range(5)] + [
+            make_card(100 + i, "unsicher") for i in range(5)
+        ]
+        ohne_sicher = {None: 1.0, "unsicher": 1.0, "mittel": 1.0, "sicher": 0.0}
+        self.assertEqual(weight_of(cards[0], weights=ohne_sicher), 0.0)
+        rng = random.Random(5)
+        labels = {pick_card(cards, weights=ohne_sicher, rng=rng).label for _ in range(500)}
+        self.assertEqual(labels, {"unsicher"})
+
+    def test_all_weights_zero_still_returns_a_card(self):
+        # Sonst bliebe die Abfrage stehen, statt einfach gleichverteilt zu ziehen.
+        cards = [make_card(i, "sicher") for i in range(4)]
+        alles_null = {None: 0.0, "unsicher": 0.0, "mittel": 0.0, "sicher": 0.0}
+        rng = random.Random(2)
+        gezogen = {pick_card(cards, weights=alles_null, rng=rng).id for _ in range(300)}
+        self.assertEqual(gezogen, {c.id for c in cards})
+
+    def test_weights_survive_a_json_roundtrip(self):
+        eigene = {None: 3.5, "unsicher": 2.0, "mittel": 1.0, "sicher": 0.0}
+        self.assertEqual(weights_from_json(weights_to_json(eigene)), eigene)
+
+    def test_weights_from_json_falls_back_to_the_defaults(self):
+        for kaputt in (None, "", "kein json", "[1, 2]", '{"unbekannt": 5}'):
+            self.assertEqual(weights_from_json(kaputt), BASE_WEIGHT)
+
+    def test_weights_from_json_keeps_defaults_for_missing_groups(self):
+        teil = weights_from_json('{"sicher": 9.0}')
+        self.assertEqual(teil["sicher"], 9.0)
+        self.assertEqual(teil[None], BASE_WEIGHT[None])
+
+    def test_weights_from_json_rejects_negative_values(self):
+        self.assertEqual(weights_from_json('{"sicher": -5}')["sicher"], 0.0)
 
     def test_pick_direction(self):
         self.assertEqual(pick_direction("fr2de"), "fr2de")

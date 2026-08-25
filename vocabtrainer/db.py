@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS reviews (
     created_at TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_reviews_card ON reviews (card_id);
 CREATE INDEX IF NOT EXISTS idx_cards_active ON cards (active, label);
 """
@@ -159,7 +164,9 @@ class _NamedRow:
     def __getitem__(self, key: str | int):
         if isinstance(key, str):
             try:
-                return self._values[self._columns[key]]
+                # Kleingeschrieben nachschlagen: die Schreibweise, die der
+                # Treiber meldet, ist nicht verlaesslich (siehe oben).
+                return self._values[self._columns[key.lower()]]
             except KeyError:
                 bekannt = ", ".join(self._columns) or "keine"
                 raise KeyError(
@@ -183,13 +190,17 @@ def _columns_from_description(description) -> dict[str, int]:
     Treiber sind sich uneinig, was in ``description`` steht: meist Tupel nach
     DB-API, manchmal blosse Strings, und Namen koennen als ``tabelle.spalte``
     kommen. Alles drei wird hier auf den nackten Spaltennamen gebracht.
+
+    Auch die Schreibweise ist nicht verlaesslich: die gehostete Datenbank gab
+    ``key`` als ``KEY`` zurueck, weil es ein SQL-Schluesselwort ist. Deshalb
+    wird durchgehend kleingeschrieben und spaeter genauso nachgeschlagen.
     """
     columns: dict[str, int] = {}
     for position, entry in enumerate(description or ()):
         name = entry if isinstance(entry, str) else (entry[0] if entry else "")
         if not name:
             return {}
-        columns[str(name).split(".")[-1].strip('"')] = position
+        columns[str(name).split(".")[-1].strip('"').lower()] = position
     return columns
 
 
@@ -219,7 +230,7 @@ def _columns_from_sql(sql: str) -> dict[str, int]:
         name = alias[-1].split(".")[-1].strip().strip('"')
         if not name or name == "*":
             return {}
-        columns[name] = position
+        columns[name.lower()] = position
     return columns
 
 
@@ -475,6 +486,30 @@ def recent_reviews(conn, limit: int = 20) -> list:
             (limit,),
         )
     )
+
+
+def get_setting(conn, key: str, default: str | None = None) -> str | None:
+    """Eine gespeicherte Einstellung lesen.
+
+    Einstellungen liegen in derselben Datenbank wie der Fortschritt - damit
+    ueberleben sie einen Neustart und gelten gehostet auf allen Geraeten.
+    """
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?)"
+        " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+
+
+def delete_setting(conn, key: str) -> None:
+    conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+    conn.commit()
 
 
 def reset_progress(conn) -> None:

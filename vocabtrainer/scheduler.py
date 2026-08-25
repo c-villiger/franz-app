@@ -14,6 +14,7 @@ Grundidee (angelehnt an Anki, aber bewusst simpel):
 
 from __future__ import annotations
 
+import json
 import random
 from datetime import datetime, timezone
 from typing import Sequence
@@ -21,13 +22,48 @@ from typing import Sequence
 from .db import Card, parse_iso
 
 # Grundgewicht pro Label. Verhaeltnis 24 : 12 : 5 : 1 -> eine unsichere Karte
-# kommt rund 12x so oft wie eine sichere.
+# kommt rund 12x so oft wie eine sichere. Im Dashboard aenderbar; der hier
+# hinterlegte Satz bleibt die Voreinstellung, auf die man zurueck kann.
 BASE_WEIGHT: dict[str | None, float] = {
     None: 24.0,        # noch nicht gefragt
     "unsicher": 12.0,
     "mittel": 5.0,
     "sicher": 1.0,
 }
+
+# Reihenfolge fuer die Anzeige und den Namen, unter dem ``None`` gespeichert
+# wird - als JSON-Schluessel taugt ``None`` nicht.
+UNSEEN_KEY = "unseen"
+WEIGHT_ORDER: tuple[str | None, ...] = (None, "unsicher", "mittel", "sicher")
+
+
+def weights_to_json(weights: dict[str | None, float]) -> str:
+    return json.dumps(
+        {(UNSEEN_KEY if label is None else label): float(value)
+         for label, value in weights.items()},
+        sort_keys=True,
+    )
+
+
+def weights_from_json(text: str | None) -> dict[str | None, float]:
+    """Gespeicherte Gewichte lesen; alles Fehlende kommt aus der Voreinstellung."""
+    weights = dict(BASE_WEIGHT)
+    if not text:
+        return weights
+    try:
+        stored = json.loads(text)
+    except (TypeError, ValueError):  # kaputter Eintrag -> Voreinstellung
+        return weights
+    if not isinstance(stored, dict):
+        return weights
+    for key, value in stored.items():
+        label = None if key == UNSEEN_KEY else key
+        if label in BASE_WEIGHT:
+            try:
+                weights[label] = max(0.0, float(value))
+            except (TypeError, ValueError):
+                pass
+    return weights
 
 # Stunden, nach denen eine Karte wieder ihr volles Gewicht hat.
 COOLDOWN_HOURS: dict[str | None, float] = {
@@ -65,19 +101,28 @@ def cooldown_factor(card: Card, now: datetime | None = None) -> float:
 def weight_of(
     card: Card,
     *,
+    weights: dict[str | None, float] | None = None,
     recent_ids: Sequence[int] = (),
     now: datetime | None = None,
 ) -> float:
-    """Auswahlgewicht einer Karte (groesser = kommt oefter dran)."""
-    weight = BASE_WEIGHT.get(card.label, 1.0) * cooldown_factor(card, now)
+    """Auswahlgewicht einer Karte (groesser = kommt oefter dran).
+
+    Gewicht 0 heisst "gar nicht abfragen" - dafuer darf hier keine untere
+    Schranke greifen.
+    """
+    base = (weights or BASE_WEIGHT).get(card.label, 1.0)
+    if base <= 0:
+        return 0.0
+    weight = base * cooldown_factor(card, now)
     if card.id in recent_ids:
         weight *= RECENT_PENALTY
-    return max(weight, 1e-6)
+    return max(weight, 1e-9)
 
 
 def pick_card(
     cards: Sequence[Card],
     *,
+    weights: dict[str | None, float] | None = None,
     recent_ids: Sequence[int] = (),
     rng: random.Random | None = None,
     now: datetime | None = None,
@@ -100,8 +145,15 @@ def pick_card(
     window = recent_window(len(cards))
     avoid = tuple(recent_ids[1:window]) if window > 1 else ()
 
-    weights = [weight_of(card, recent_ids=avoid, now=now) for card in candidates]
-    return rng.choices(candidates, weights=weights, k=1)[0]
+    gewichte = [
+        weight_of(card, weights=weights, recent_ids=avoid, now=now)
+        for card in candidates
+    ]
+    if sum(gewichte) <= 0:
+        # Alle Gruppen auf 0 gestellt: lieber gleichverteilt weitermachen,
+        # als die Abfrage stehen zu lassen.
+        gewichte = [1.0] * len(candidates)
+    return rng.choices(candidates, weights=gewichte, k=1)[0]
 
 
 def pick_direction(mode: str, rng: random.Random | None = None) -> str:
