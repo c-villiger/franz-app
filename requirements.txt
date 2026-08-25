@@ -3,3 +3,7 @@ streamlit>=1.49
 
 # QR-Code der WLAN-Adresse beim Start (reines Python, keine Bildbibliothek nötig)
 qrcode>=7.4
+
+# Client für eine gehostete, SQLite-kompatible Datenbank (libSQL/Turso).
+# Nur nötig, wenn FRANZ_DB_URL gesetzt ist – lokal genügt sqlite3.
+libsql>=0.1

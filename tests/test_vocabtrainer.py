@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import builtins
+import os
 import random
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from vocabtrainer import config  # noqa: E402
 from vocabtrainer import db as dbmod  # noqa: E402
 from vocabtrainer import netinfo  # noqa: E402
 from vocabtrainer.scheduler import (  # noqa: E402
@@ -44,9 +46,13 @@ class TempPaths(unittest.TestCase):
         self.db = self.tmp / "vocab.db"
         self.addCleanup(self._tmp.cleanup)
 
+    # Ueberschrieben von TestDatabaseLibsql, damit dieselben Tests auch gegen
+    # den libSQL-Adapter laufen.
+    BACKEND = "sqlite3"
+
     def conn_with(self, entries):
         append_entries(entries, self.vocab)
-        conn = dbmod.connect(self.db)
+        conn = dbmod.connect(self.db, backend=self.BACKEND)
         dbmod.sync_from_file(conn, load_entries(self.vocab))
         self.addCleanup(conn.close)
         return conn
@@ -184,10 +190,74 @@ class TestDatabase(TempPaths):
         dbmod.set_label(conn, card.id, "unsicher")
         conn.close()
 
-        conn2 = dbmod.connect(self.db)
+        conn2 = dbmod.connect(self.db, backend=self.BACKEND)
         self.addCleanup(conn2.close)
         dbmod.sync_from_file(conn2, load_entries(self.vocab))
         self.assertEqual(dbmod.all_cards(conn2)[0].label, "unsicher")
+
+
+class TestDatabaseLibsql(TestDatabase):
+    """Dieselben Tests noch einmal über den libSQL-Adapter.
+
+    Der Client liefert nackte Tupel statt benannter Zeilen - die
+    Adapterschicht muss das so überdecken, dass kein einziger Test es merkt.
+    Geprüft wird gegen eine lokale Datei, das braucht kein Netz.
+    """
+
+    BACKEND = "libsql"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import libsql  # noqa: F401
+        except ImportError:  # pragma: no cover - Paket nicht installiert
+            raise unittest.SkipTest("Paket 'libsql' ist nicht installiert")
+
+    def test_creates_the_directory_of_a_fresh_database(self):
+        # libSQL legt fehlende Verzeichnisse - anders als sqlite3 - nicht an.
+        fresh = self.tmp / "noch" / "nicht" / "da" / "vocab.db"
+        conn = dbmod.connect(fresh, backend=self.BACKEND)
+        self.addCleanup(conn.close)
+        self.assertTrue(fresh.exists())
+
+
+class TestNamedRow(unittest.TestCase):
+    """Die Zeilen des Adapters müssen sich wie sqlite3.Row verhalten."""
+
+    def setUp(self) -> None:
+        self.row = dbmod._NamedRow(("abc", 7, None), {"fr": 0, "times_asked": 1, "label": 2})
+
+    def test_access_by_column_name(self):
+        self.assertEqual(self.row["fr"], "abc")
+        self.assertEqual(self.row["times_asked"], 7)
+        self.assertIsNone(self.row["label"])
+
+    def test_access_by_position(self):
+        self.assertEqual(self.row[0], "abc")
+
+    def test_unknown_column_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            self.row["gibtsnicht"]
+
+    def test_keys_and_len(self):
+        self.assertEqual(self.row.keys(), ["fr", "times_asked", "label"])
+        self.assertEqual(len(self.row), 3)
+
+
+class TestBackendSelection(unittest.TestCase):
+    def test_url_selects_libsql(self):
+        self.assertTrue(config.vocab_readonly("libsql://irgendwo.turso.io"))
+
+    def test_no_url_keeps_the_vocab_file_writable(self):
+        self.assertFalse(config.vocab_readonly(""))
+
+    def test_readonly_can_be_forced_off(self):
+        with mock.patch.dict(os.environ, {"FRANZ_VOCAB_READONLY": "0"}):
+            self.assertFalse(config.vocab_readonly("libsql://irgendwo.turso.io"))
+
+    def test_readonly_can_be_forced_on(self):
+        with mock.patch.dict(os.environ, {"FRANZ_VOCAB_READONLY": "1"}):
+            self.assertTrue(config.vocab_readonly(""))
 
 
 def make_card(card_id: int, label: str | None, last_asked: str | None = None) -> dbmod.Card:

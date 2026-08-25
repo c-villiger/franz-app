@@ -6,12 +6,14 @@ Starten:  streamlit run app.py      (oder ./run.sh)
 from __future__ import annotations
 
 import inspect
+import os
 import random
 import subprocess
 from html import escape
 
 import streamlit as st
 
+from vocabtrainer import config
 from vocabtrainer import db as dbmod
 from vocabtrainer.config import (
     DIRECTION_LABELS,
@@ -119,14 +121,32 @@ BAR_COLORS = {
 }
 
 
+def _from_secrets(key: str) -> str:
+    """Wert aus `.streamlit/secrets.toml` bzw. den Secrets der Streamlit-Cloud."""
+    try:
+        return str(st.secrets.get(key, "")).strip()
+    except Exception:  # keine Secrets hinterlegt -> lokaler Betrieb
+        return ""
+
+
+# Lokal kommt die Konfiguration aus der Umgebung, gehostet aus den Secrets.
+DB_URL = os.environ.get("FRANZ_DB_URL", "").strip() or _from_secrets("db_url")
+DB_TOKEN = os.environ.get("FRANZ_DB_TOKEN", "").strip() or _from_secrets("db_token")
+
+# Auf einem Server ist das Dateisystem flüchtig: dort dürfen Vokabeln nur über
+# das Repo dazukommen, sonst überlebt die Karte in der Datenbank, ihre Zeile in
+# der Datei aber nicht - und der nächste Abgleich deaktiviert sie wieder.
+VOCAB_READONLY = config.vocab_readonly(DB_URL)
+
+
 @st.cache_resource
-def get_conn():
-    conn = dbmod.connect()
+def get_conn(url: str, token: str):
+    conn = dbmod.connect(url=url, token=token)
     dbmod.sync_from_file(conn, load_entries())
     return conn
 
 
-conn = get_conn()
+conn = get_conn(DB_URL, DB_TOKEN)
 ss = st.session_state
 ss.setdefault("current_id", None)
 ss.setdefault("direction", "fr2de")
@@ -176,28 +196,38 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Vokabeln hinzufügen")
-    with st.form("add_form", clear_on_submit=True):
-        raw = st.text_area(
-            "Eine Vokabel pro Zeile",
-            placeholder="avoir le cafard | Trübsal blasen | idiom\nposer un lapin | jemanden versetzen",
-            height=120,
+    if VOCAB_READONLY:
+        st.caption(
+            "Diese Instanz läuft gehostet – neue Vokabeln kommen über das Repo "
+            f"(`{VOCAB_FILE.relative_to(ROOT)}`) dazu. Nach dem Push erscheinen "
+            "sie beim nächsten Deploy automatisch hier."
         )
-        submitted = st.form_submit_button("Hinzufügen")
-    if submitted and raw.strip():
-        try:
-            entries = parse_pair_text(raw)
-            result = append_entries(entries)
-            sync = dbmod.sync_from_file(conn, load_entries())
-            st.success(f"{result.n_added} hinzugefügt, {len(result.duplicates)} Duplikate. {sync.summary()}")
-        except VocabFileError as exc:
-            st.error(str(exc))
+    else:
+        with st.form("add_form", clear_on_submit=True):
+            raw = st.text_area(
+                "Eine Vokabel pro Zeile",
+                placeholder="avoir le cafard | Trübsal blasen | idiom\nposer un lapin | jemanden versetzen",
+                height=120,
+            )
+            submitted = st.form_submit_button("Hinzufügen")
+        if submitted and raw.strip():
+            try:
+                entries = parse_pair_text(raw)
+                result = append_entries(entries)
+                sync = dbmod.sync_from_file(conn, load_entries())
+                st.success(f"{result.n_added} hinzugefügt, {len(result.duplicates)} Duplikate. {sync.summary()}")
+            except VocabFileError as exc:
+                st.error(str(exc))
 
     st.divider()
     st.subheader("Synchronisieren")
     st.caption(f"Vokabeldatei: `{VOCAB_FILE.relative_to(ROOT)}`")
+    st.caption(
+        "Fortschritt: gehostete Datenbank" if DB_URL else "Fortschritt: lokale Datei"
+    )
     if st.button("Datei → Datenbank"):
         st.success(dbmod.sync_from_file(conn, load_entries()).summary())
-    if st.button("git pull (neue Wörter vom Handy holen)"):
+    if not VOCAB_READONLY and st.button("git pull (neue Wörter vom Handy holen)"):
         try:
             out = subprocess.run(
                 ["git", "pull", "--ff-only"],

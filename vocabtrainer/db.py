@@ -1,23 +1,36 @@
-"""SQLite-Datenbank mit dem Lernfortschritt.
+"""Datenbank mit dem Lernfortschritt.
 
 Aufgabenteilung:
   * ``vocab/vocab.jsonl`` = Quelle der Wahrheit fuer *welche* Vokabeln es gibt.
-  * ``data/vocab.db``     = Quelle der Wahrheit fuer *wie gut* sie sitzen.
+  * die Datenbank         = Quelle der Wahrheit fuer *wie gut* sie sitzen.
 
 ``sync_from_file`` gleicht beides ab: neue Zeilen werden angelegt, geaenderte
 Texte aktualisiert, aus der Datei entfernte Karten deaktiviert (nicht
 geloescht - so bleibt die Historie erhalten, falls sie zurueckkommen).
+
+Zwei Ablagen, gleiches SQL:
+  * **lokal** ``data/vocab.db`` ueber das ``sqlite3`` der Standardbibliothek -
+    braucht kein Internet und keine Zusatzpakete.
+  * **gehostet** eine libSQL-/Turso-Datenbank, sobald ``FRANZ_DB_URL`` gesetzt
+    ist - noetig, wenn das Dashboard auf einem Server liegt, dessen
+    Dateisystem beim Neustart geleert wird.
+
+Der libSQL-Client liefert Zeilen als nackte Tupel und kennt keine
+``row_factory``. Damit der restliche Code nichts davon merkt, legt
+``_LibsqlConnection`` eine duenne Schicht darueber, die Zeilen wie
+``sqlite3.Row`` per Spaltenname zugaenglich macht.
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from .config import DB_PATH, LABELS
+from .config import DB_PATH, DB_TOKEN, DB_URL, LABELS
 from .vocab_file import Entry, load_entries
 
 SCHEMA = """
@@ -78,7 +91,7 @@ class Card:
     last_labeled_at: str | None
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "Card":
+    def from_row(cls, row) -> "Card":
         raw_tags = row["tags"] or ""
         return cls(
             id=row["id"],
@@ -126,19 +139,144 @@ class SyncResult:
         return ", ".join(bits)
 
 
-def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
+class _NamedRow:
+    """Zeile mit Zugriff ueber den Spaltennamen - wie ``sqlite3.Row``."""
+
+    __slots__ = ("_values", "_columns")
+
+    def __init__(self, values: Sequence, columns: dict[str, int]) -> None:
+        self._values = values
+        self._columns = columns
+
+    def __getitem__(self, key: str | int):
+        if isinstance(key, str):
+            try:
+                return self._values[self._columns[key]]
+            except KeyError:
+                raise KeyError(f"Unbekannte Spalte: {key!r}") from None
+        return self._values[key]
+
+    def keys(self) -> list[str]:
+        return list(self._columns)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __repr__(self) -> str:  # pragma: no cover - nur fuer Fehlersuche
+        return f"_NamedRow({dict(zip(self._columns, self._values))!r})"
+
+
+class _LibsqlCursor:
+    """Cursor, dessen Zeilen sich wie ``sqlite3.Row`` verhalten."""
+
+    def __init__(self, cursor) -> None:
+        self._cursor = cursor
+        self._columns = {
+            description[0]: position
+            for position, description in enumerate(cursor.description or ())
+        }
+
+    def _wrap(self, values):
+        return None if values is None else _NamedRow(values, self._columns)
+
+    def fetchone(self):
+        return self._wrap(self._cursor.fetchone())
+
+    def fetchall(self) -> list[_NamedRow]:
+        return [self._wrap(values) for values in self._cursor.fetchall()]
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class _LibsqlConnection:
+    """``sqlite3``-aehnliche Fassade um eine libSQL-Verbindung."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, parameters: Sequence = ()) -> _LibsqlCursor:
+        return _LibsqlCursor(self._conn.execute(sql, tuple(parameters)))
+
+    def executescript(self, script: str) -> None:
+        self._conn.executescript(script)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _connect_libsql(target: str, token: str = "") -> _LibsqlConnection:
+    try:
+        import libsql
+    except ImportError as exc:  # pragma: no cover - fehlendes Paket
+        raise RuntimeError(
+            "Für eine gehostete Datenbank fehlt das Paket 'libsql'. "
+            "Installieren mit: pip install -r requirements.txt"
+        ) from exc
+    return _LibsqlConnection(libsql.connect(target, auth_token=token))
+
+
+def _prepared_path(db_path: Path | str | None) -> Path:
+    """Pfad der lokalen Datenbank, Verzeichnis angelegt."""
     path = Path(db_path or DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _connect_sqlite(db_path: Path | str | None) -> sqlite3.Connection:
+    path = _prepared_path(db_path)
+    # check_same_thread=False, weil Streamlit das Skript in wechselnden
+    # Threads ausfuehrt, die Verbindung aber zwischengespeichert wird.
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def connect(
+    db_path: Path | str | None = None,
+    *,
+    url: str | None = None,
+    token: str | None = None,
+    backend: str | None = None,
+):
+    """Verbindung aufbauen und das Schema sicherstellen.
+
+    Ohne Argumente entscheidet die Umgebung: ist ``FRANZ_DB_URL`` gesetzt,
+    geht es zur gehosteten Datenbank, sonst in die lokale Datei.
+
+    ``backend='libsql'`` (auch per ``FRANZ_DB_BACKEND``) erzwingt den
+    libSQL-Client fuer eine lokale Datei - so laesst sich diese Schicht ohne
+    Turso-Konto und ohne Netzzugang ausprobieren.
+    """
+    target = (DB_URL if url is None else url).strip()
+    if backend is None:
+        backend = os.environ.get("FRANZ_DB_BACKEND", "").strip() or None
+    if backend is None:
+        backend = "libsql" if target else "sqlite3"
+
+    if backend == "libsql" and target:
+        conn = _connect_libsql(target, DB_TOKEN if token is None else token)
+        conn.execute("PRAGMA foreign_keys = ON")
+    elif backend == "libsql":
+        # Lokale Datei über den libSQL-Client (nur zum Ausprobieren des
+        # Adapters). Ohne Token, und das Verzeichnis muss existieren -
+        # anders als sqlite3 legt libSQL es nicht selbst an.
+        conn = _connect_libsql(str(_prepared_path(db_path)))
+        conn.execute("PRAGMA foreign_keys = ON")
+    else:
+        conn = _connect_sqlite(db_path)
+
     conn.executescript(SCHEMA)
     conn.commit()
     return conn
 
 
 def sync_from_file(
-    conn: sqlite3.Connection, entries: Iterable[Entry] | None = None
+    conn, entries: Iterable[Entry] | None = None
 ) -> SyncResult:
     """Gleicht die Datenbank mit der Vokabeldatei ab."""
     entry_list = list(entries) if entries is not None else load_entries()
@@ -187,7 +325,7 @@ def sync_from_file(
 
 
 def all_cards(
-    conn: sqlite3.Connection,
+    conn,
     *,
     tags: Sequence[str] | None = None,
     include_inactive: bool = False,
@@ -202,12 +340,12 @@ def all_cards(
     return cards
 
 
-def get_card(conn: sqlite3.Connection, card_id: int) -> Card | None:
+def get_card(conn, card_id: int) -> Card | None:
     row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
     return Card.from_row(row) if row else None
 
 
-def all_tags(conn: sqlite3.Connection) -> list[str]:
+def all_tags(conn) -> list[str]:
     tags: set[str] = set()
     for row in conn.execute("SELECT tags FROM cards WHERE active = 1"):
         tags.update(t for t in (row["tags"] or "").split(",") if t)
@@ -215,7 +353,7 @@ def all_tags(conn: sqlite3.Connection) -> list[str]:
 
 
 def set_label(
-    conn: sqlite3.Connection, card_id: int, label: str, direction: str = ""
+    conn, card_id: int, label: str, direction: str = ""
 ) -> None:
     """Speichert eine Bewertung und protokolliert sie in ``reviews``."""
     if label not in LABELS:
@@ -233,13 +371,13 @@ def set_label(
     conn.commit()
 
 
-def mark_skipped(conn: sqlite3.Connection, card_id: int) -> None:
+def mark_skipped(conn, card_id: int) -> None:
     """Karte wurde uebersprungen: nur den Zeitstempel setzen, kein Label."""
     conn.execute("UPDATE cards SET last_asked_at = ? WHERE id = ?", (now_iso(), card_id))
     conn.commit()
 
 
-def stats(conn: sqlite3.Connection, cards: Sequence[Card] | None = None) -> dict[str, int]:
+def stats(conn, cards: Sequence[Card] | None = None) -> dict[str, int]:
     """Zaehler fuer die Kopfzeile des Dashboards."""
     cards = all_cards(conn) if cards is None else cards
     counts = {label: 0 for label in LABELS}
@@ -253,7 +391,7 @@ def stats(conn: sqlite3.Connection, cards: Sequence[Card] | None = None) -> dict
     return counts
 
 
-def reviews_today(conn: sqlite3.Connection) -> int:
+def reviews_today(conn) -> int:
     today = datetime.now(timezone.utc).date().isoformat()
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM reviews WHERE created_at >= ?", (today,)
@@ -261,7 +399,7 @@ def reviews_today(conn: sqlite3.Connection) -> int:
     return int(row["n"])
 
 
-def recent_reviews(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
+def recent_reviews(conn, limit: int = 20) -> list:
     return list(
         conn.execute(
             "SELECT r.created_at, r.label, r.direction, c.fr, c.de"
@@ -272,7 +410,7 @@ def recent_reviews(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Ro
     )
 
 
-def reset_progress(conn: sqlite3.Connection) -> None:
+def reset_progress(conn) -> None:
     """Setzt alle Labels zurueck - die Vokabeln selbst bleiben erhalten."""
     conn.execute(
         "UPDATE cards SET label = NULL, times_asked = 0,"

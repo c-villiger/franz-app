@@ -56,7 +56,9 @@ Vorgehen:
 ### Was nicht passieren darf
 
 * `data/vocab.db` **nicht** anfassen oder committen – das ist der lokale
-  Lernfortschritt des Nutzers und bewusst gitignored.
+  Lernfortschritt des Nutzers und bewusst gitignored. Dasselbe gilt für
+  `.streamlit/secrets.toml`: dort stehen die Zugangsdaten der gehosteten
+  Datenbank, die Datei darf nie im Repo landen.
 * Zeilen in `vocab/vocab.jsonl` nicht löschen oder neu formatieren, ausser der
   Nutzer bittet ausdrücklich darum. Der Schlüssel einer Karte ergibt sich aus
   `fr` + `de`; wird eine Zeile umgeschrieben, gilt sie als neue Karte und der
@@ -70,7 +72,7 @@ Vorgehen:
 |---|---|
 | `app.py` | Streamlit-Dashboard |
 | `vocabtrainer/vocab_file.py` | Vokabeldatei lesen/schreiben, Duplikate |
-| `vocabtrainer/db.py` | SQLite: Abgleich, Labels, Statistik |
+| `vocabtrainer/db.py` | Abgleich, Labels, Statistik; lokal SQLite, gehostet libSQL |
 | `vocabtrainer/scheduler.py` | gewichtete Zufallsauswahl der nächsten Karte |
 | `vocabtrainer/netinfo.py` | WLAN-Adresse und QR-Code für den Zugriff vom Handy |
 | `vocabtrainer/cli.py` | Kommandozeile |

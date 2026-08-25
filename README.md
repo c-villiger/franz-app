@@ -144,6 +144,82 @@ python3 -m vocabtrainer.cli list --label unsicher
 
 ---
 
+## Ohne eigenen Rechner betreiben (Streamlit Cloud + Turso)
+
+Bis hierher muss dein Rechner laufen, damit du üben kannst. Für „von überall,
+auch wenn der Laptop zu ist" braucht es zwei Dinge – und das zweite ist der
+eigentliche Knackpunkt:
+
+| | wohin |
+|---|---|
+| Die App | Streamlit Community Cloud, direkt aus diesem Repo, gratis |
+| Der Lernstand | **nicht** ins Dateisystem – das wird dort beim Neustart geleert |
+
+Deshalb kann der Fortschritt statt in `data/vocab.db` auch in einer gehosteten,
+SQLite-kompatiblen Datenbank liegen ([libSQL/Turso](https://turso.tech)). Das
+SQL bleibt identisch; nur die Verbindung ändert sich.
+
+### Einrichten
+
+1. **Datenbank anlegen** – bei Turso ein Konto erstellen, eine Datenbank
+   anlegen und dir die beiden Werte geben lassen:
+   die URL (`libsql://…turso.io`) und ein Auth-Token.
+
+2. **App deployen** – auf [share.streamlit.io](https://share.streamlit.io) das
+   Repo verbinden, als Einstiegspunkt `app.py` wählen. Im Free-Tier lässt sich
+   **eine App privat** schalten (nur deine E-Mail-Adresse kommt rein) – damit
+   erübrigt sich ein Passwort.
+
+3. **Zugangsdaten hinterlegen** – in der Streamlit Cloud unter
+   *App → Settings → Secrets* (Vorlage: `.streamlit/secrets.toml.example`):
+
+   ```toml
+   db_url = "libsql://deine-datenbank-deinorg.turso.io"
+   db_token = "dein-token"
+   ```
+
+Fertig. Beim ersten Start legt die App das Schema in der Datenbank an und
+liest die Vokabeln aus dem Repo ein.
+
+### Was sich dadurch ändert
+
+* **Der Lernstand ist nicht mehr pro Gerät.** Handy und Laptop teilen sich
+  einen Fortschritt. Damit das auch lokal gilt, dieselben zwei Werte vor dem
+  Start setzen:
+
+  ```bash
+  export FRANZ_DB_URL="libsql://deine-datenbank-deinorg.turso.io"
+  export FRANZ_DB_TOKEN="dein-token"
+  ./run.sh
+  ```
+
+  Ohne diese Variablen läuft weiterhin alles lokal und offline.
+
+* **Vokabeln kommen nur noch über das Repo.** Gehostet blendet das Dashboard
+  das Hinzufügen-Formular aus – und das mit Absicht: eine dort eingetippte
+  Vokabel landet in der (dauerhaften) Datenbank, ihre Zeile in
+  `vocab/vocab.jsonl` aber im flüchtigen Dateisystem. Beim nächsten Neustart
+  wäre die Zeile weg und der Abgleich würde die Karte als „gelöscht"
+  deaktivieren. Der Weg über Claude aufs Handy → Push → automatisches Deploy
+  bleibt davon unberührt und wird sogar kürzer: kein `git pull` mehr nötig.
+
+  Zum Aufheben, falls du lokal gegen die gehostete Datenbank arbeitest:
+  `FRANZ_VOCAB_READONLY=0`.
+
+* **Die App schläft** nach längerer Ruhe ein; der erste Aufruf danach dauert
+  einen Moment. Der Fortschritt bleibt, er liegt ja in der Datenbank.
+
+### Den Adapter ohne Turso-Konto ausprobieren
+
+Der libSQL-Client lässt sich auch auf eine lokale Datei richten – praktisch,
+um zu sehen, ob alles läuft, bevor man ein Konto anlegt:
+
+```bash
+FRANZ_DB_BACKEND=libsql ./run.sh
+```
+
+---
+
 ## Wie die Auswahl funktioniert
 
 Die nächste Karte wird **zufällig gezogen, aber gewichtet** – ähnlich wie bei
@@ -175,10 +251,12 @@ app.py                     Streamlit-Dashboard
 run.sh                     Startskript (venv + streamlit run)
 vocab/vocab.jsonl          Vokabelliste – Quelle der Wahrheit, versioniert
 data/vocab.db              Fortschritt (SQLite) – lokal, nicht versioniert
+.streamlit/secrets.toml.example  Vorlage für den gehosteten Betrieb
 vocabtrainer/
   config.py                Pfade und Konstanten
   vocab_file.py            Vokabeldatei lesen/schreiben, Duplikat-Erkennung
-  db.py                    Schema, Abgleich Datei→DB, Labels, Statistik
+  db.py                    Schema, Abgleich Datei→DB, Labels, Statistik;
+                           lokal via sqlite3, gehostet via libSQL
   scheduler.py             gewichtete Zufallsauswahl
   netinfo.py               WLAN-Adresse ermitteln, QR-Code fürs Handy
   cli.py                   Kommandozeile (add / check / sync / stats / list)
