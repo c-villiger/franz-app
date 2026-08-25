@@ -72,6 +72,7 @@ Vorgehen:
 | `vocabtrainer/vocab_file.py` | Vokabeldatei lesen/schreiben, Duplikate |
 | `vocabtrainer/db.py` | SQLite: Abgleich, Labels, Statistik |
 | `vocabtrainer/scheduler.py` | gewichtete Zufallsauswahl der nächsten Karte |
+| `vocabtrainer/netinfo.py` | WLAN-Adresse und QR-Code für den Zugriff vom Handy |
 | `vocabtrainer/cli.py` | Kommandozeile |
 | `tests/` | `python3 -m unittest discover -s tests` |
 

@@ -19,8 +19,12 @@ cd franz-app
 ```
 
 `run.sh` legt beim ersten Mal eine virtuelle Umgebung unter `.venv` an,
-installiert dort Streamlit und startet das Dashboard. Der Browser öffnet sich
-von selbst; sonst <http://localhost:8501> aufrufen.
+installiert dort die Abhängigkeiten und startet das Dashboard. Der Browser
+öffnet sich von selbst; sonst <http://localhost:8501> aufrufen.
+
+Bei jedem weiteren Start vergleicht das Skript `requirements.txt` mit dem
+Stand in der `.venv` und installiert nur nach, wenn sich etwas geändert hat –
+nach einem `git pull` mit neuen Paketen läuft es also ohne Zutun weiter.
 
 ## Ohne das Skript (z.B. Windows-PowerShell)
 
@@ -43,16 +47,42 @@ so macht es `run.sh`.
 
 ## Vom Handy im gleichen WLAN
 
-Streamlit gibt beim Start zwei Adressen aus:
+`run.sh` zeigt beim Start alle Adressen und einen QR-Code – Handykamera drauf,
+fertig, ohne IP abzutippen:
 
 ```
-Local URL:   http://localhost:8501      ← nur auf dem Rechner selbst
-Network URL: http://192.168.x.x:8501    ← diese aufs Handy
+  Auf diesem Rechner     http://localhost:8501
+  Im WLAN (fürs Handy)   http://192.168.1.42:8501
+  Oder per Name          http://macbook.local:8501
+
+  Mit der Handykamera scannen:
+  █████████████████████████████████
+  ████ ▄▄▄▄▄ █▄▄▄▀▀███▄█ ▄▄▄▄▄ ████
+  ...
 ```
 
-`localhost` zeigt auf dem Handy auf das Handy selbst – es braucht die
-**Network URL**. Die funktioniert, weil `run.sh` an `0.0.0.0` bindet; von Hand
+Wichtig: `localhost` zeigt auf dem Handy auf das Handy selbst. Es braucht die
+WLAN-Adresse – die funktioniert, weil `run.sh` an `0.0.0.0` bindet. Von Hand
 gestartet dafür `streamlit run app.py --server.address 0.0.0.0` verwenden.
+
+Ein QR-Code im Terminal besteht aus Blockzeichen, seine Farben hängen also am
+Hintergrund des Terminals. Voreingestellt ist die Variante für **dunkle**
+Terminals. Erkennt die Kamera nichts, ist er für dein Terminal invertiert:
+
+```bash
+FRANZ_QR_INVERT=0 ./run.sh
+```
+
+Die Adressen und den Code gibt es auch ohne Neustart:
+
+```bash
+.venv/bin/python -m vocabtrainer.netinfo
+```
+
+Die IP kann sich ändern, wenn der Router neu vergibt. `http://<name>.local:8501`
+bleibt dagegen stabil (den Namen liefert `scutil --get LocalHostName` auf macOS,
+`hostname` sonst) – vom iPhone aus zuverlässig, bei Android je nach Version.
+Dauerhaft am robustesten ist eine feste IP per DHCP-Reservierung im Router.
 
 ---
 
@@ -150,6 +180,7 @@ vocabtrainer/
   vocab_file.py            Vokabeldatei lesen/schreiben, Duplikat-Erkennung
   db.py                    Schema, Abgleich Datei→DB, Labels, Statistik
   scheduler.py             gewichtete Zufallsauswahl
+  netinfo.py               WLAN-Adresse ermitteln, QR-Code fürs Handy
   cli.py                   Kommandozeile (add / check / sync / stats / list)
 tests/                     Tests (unittest, ohne Zusatzabhängigkeiten)
 ```

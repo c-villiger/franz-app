@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import builtins
 import random
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from vocabtrainer import db as dbmod  # noqa: E402
+from vocabtrainer import netinfo  # noqa: E402
 from vocabtrainer.scheduler import (  # noqa: E402
     BASE_WEIGHT,
     cooldown_factor,
@@ -268,6 +271,68 @@ class TestScheduler(unittest.TestCase):
         rng = random.Random(1)
         picked = {pick_direction("mixed", rng) for _ in range(50)}
         self.assertEqual(picked, {"fr2de", "de2fr"})
+
+
+
+
+class TestNetinfo(unittest.TestCase):
+    """Adresse und QR-Code fuer den Zugriff vom Handy."""
+
+    def test_urls_always_offer_localhost(self):
+        labels = dict((label, url) for label, url in netinfo.urls(8501))
+        self.assertIn("http://localhost:8501", labels.values())
+
+    def test_urls_use_the_given_port(self):
+        for _, url in netinfo.urls(9000):
+            self.assertTrue(url.endswith(":9000"), url)
+
+    def test_lan_ip_is_never_loopback(self):
+        # Sonst stünde auf dem QR-Code eine Adresse, die auf dem Handy
+        # auf das Handy selbst zeigt.
+        ip = netinfo.lan_ip()
+        if ip is not None:
+            self.assertFalse(ip.startswith("127."), ip)
+
+    def test_mdns_hostname_has_no_domain_and_ends_in_local(self):
+        host = netinfo.mdns_hostname()
+        if host is not None:
+            self.assertTrue(host.endswith(".local"), host)
+            self.assertEqual(host.count("."), 1, host)
+
+    def test_qr_lines_are_rectangular_and_use_only_block_characters(self):
+        lines = netinfo.qr_lines("http://192.168.1.42:8501")
+        self.assertIsNotNone(lines, "qrcode ist nicht installiert")
+        self.assertEqual(len({len(line) for line in lines}), 1, "Zeilen unterschiedlich lang")
+        self.assertLessEqual(len(lines[0]), 80, "passt nicht in ein Terminal")
+        self.assertLessEqual(set("".join(lines)), set("█▄▀\xa0 "))
+
+    def test_qr_polarity_actually_flips(self):
+        url = "http://192.168.1.42:8501"
+        self.assertNotEqual(netinfo.qr_lines(url, invert=True), netinfo.qr_lines(url, invert=False))
+
+    def test_qr_has_a_quiet_zone(self):
+        # Ohne Ruhebereich am Rand erkennen Kameras den Code schlecht.
+        lines = netinfo.qr_lines("http://192.168.1.42:8501", invert=False)
+        self.assertEqual(set(lines[0]), {"\xa0"}, "oberste Zeile ist nicht leer")
+        self.assertEqual({line[0] for line in lines}, {"\xa0"}, "linke Spalte ist nicht leer")
+
+    def test_banner_mentions_the_phone_url(self):
+        text = netinfo.banner(8501)
+        url = netinfo.phone_url(8501)
+        if url:
+            self.assertIn(url, text)
+
+    def test_banner_survives_a_missing_qrcode_package(self):
+        real_import = builtins.__import__
+
+        def without_qrcode(name, *args, **kwargs):
+            if name == "qrcode":
+                raise ImportError("nicht installiert")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", without_qrcode):
+            self.assertIsNone(netinfo.qr_lines("http://example.invalid"))
+            self.assertIn("http://localhost:8501", netinfo.banner(8501))
 
 
 if __name__ == "__main__":

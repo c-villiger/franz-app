@@ -1,2 +1,5 @@
 # Dashboard. Der Rest (SQLite, JSON) kommt aus der Python-Standardbibliothek.
 streamlit>=1.49
+
+# QR-Code der WLAN-Adresse beim Start (reines Python, keine Bildbibliothek nötig)
+qrcode>=7.4
