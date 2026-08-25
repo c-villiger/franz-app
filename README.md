@@ -101,8 +101,7 @@ Das Dashboard hat zwei Tabs: **Üben** (die Abfrage) und **Wörterliste**
 | 👁️ Antwort zeigen | Blendet die Übersetzung ein (Tastenkürzel: `Leertaste`) |
 | 🟢 / 🟡 / 🔴 | Bewertung speichern und nächste Karte ziehen (Kürzel `1` / `2` / `3`) |
 | ⏭️ Überspringen | Nächste Karte, ohne zu bewerten |
-| 🔁 Richtung drehen | Diese Karte in der anderen Richtung ansehen |
-| Seitenleiste | Abfragerichtung, Tag-Filter, Vokabeln hinzufügen, `git pull`, Zurücksetzen |
+| Seitenleiste | Abfragerichtung, Tag-Filter, Auswahl-Algorithmus, Neu laden, Zurücksetzen |
 
 ### Wörterliste
 

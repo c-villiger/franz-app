@@ -9,6 +9,7 @@ import inspect
 import os
 import random
 import subprocess
+from dataclasses import replace
 from html import escape
 
 import streamlit as st
@@ -121,10 +122,28 @@ CSS = """
   .st-key-b_sicher button, .st-key-b_mittel button, .st-key-b_unsicher button {
       height: 3.1rem; font-size: 1.02rem; font-weight: 600;
   }
-  .st-key-b_sicher button:hover   { border-color: #3fb950; color: #3fb950; }
-  .st-key-b_mittel button:hover   { border-color: #e3b341; color: #e3b341; }
-  .st-key-b_unsicher button:hover { border-color: #e5534b; color: #e5534b; }
+  /* Nur für echte Zeigergeräte: auf dem Handy bleibt :hover nach dem
+     Antippen hängen, der Knopf sähe dann noch angetippt aus, während längst
+     die nächste Karte da ist. */
+  @media (hover: hover) and (pointer: fine) {
+      .st-key-b_sicher button:hover   { border-color: #3fb950; color: #3fb950; }
+      .st-key-b_mittel button:hover   { border-color: #e3b341; color: #e3b341; }
+      .st-key-b_unsicher button:hover { border-color: #e5534b; color: #e5534b; }
+  }
   .st-key-reveal button { height: 3rem; }
+  /* iOS lässt den Fokus nach dem Antippen auf dem Knopf stehen - der bliebe
+     sonst hervorgehoben, während längst die nächste Karte da ist. Nur die
+     Maus-/Touch-Variante zurücksetzen; wer per Tastatur navigiert
+     (:focus-visible), soll weiterhin sehen, wo er ist. */
+  .stButton button { -webkit-tap-highlight-color: transparent; }
+  /* Nach dem Antippen behält iOS den Fokus auf dem Knopf; Streamlit legt
+     dann einen grauen Schleier darüber, der Knopf sähe noch angetippt aus.
+     Nur diese eine Eigenschaft zurücksetzen - "transparent" zeigt die
+     Seitenfarbe und stimmt damit auch im Dunkelmodus. Wer per Tastatur
+     navigiert (:focus-visible), behält seine Hervorhebung. */
+  .stButton button:focus:not(:focus-visible) {
+      background-color: transparent !important;
+  }
   @media (max-width: 640px) {
       .franz-prompt { font-size: 1.55rem; }
       .franz-card { padding: 1.8rem 1rem; }
@@ -188,11 +207,14 @@ def get_conn(url: str, token: str):
 
 conn = get_conn(DB_URL, DB_TOKEN)
 
-# Alles, was aus der Datenbank kommt, wird EINMAL pro Skriptdurchlauf geholt
-# und danach im Speicher weiterverwendet. Gehostet ist jede Abfrage ein
-# Netzwerk-Roundtrip; vorher wurde dieselbe Kartentabelle bis zu sieben Mal
-# pro Klick gelesen, was das Dashboard spürbar träge machte.
-ALLE_KARTEN = dbmod.all_cards(conn)
+# Gehostet ist jede Abfrage ein Netzwerk-Roundtrip. Deshalb wird die
+# Kartentabelle einmal pro Sitzung gelesen und danach im Speicher gehalten;
+# eine Bewertung ändert genau eine Karte, das lässt sich lokal nachziehen,
+# statt die ganze Tabelle neu zu holen. "Antwort zeigen" und der Wechsel
+# zwischen den Tabs kommen dadurch ganz ohne Datenbank aus.
+if "karten" not in st.session_state:
+    st.session_state["karten"] = dbmod.all_cards(conn)
+ALLE_KARTEN = st.session_state["karten"]
 KARTE_NACH_ID = {c.id: c for c in ALLE_KARTEN}
 ALLE_TAGS = sorted({t for c in ALLE_KARTEN for t in c.tags})
 
@@ -221,6 +243,14 @@ ss.setdefault("tag_filter", [])
 ss.setdefault("session_count", 0)
 ss.setdefault("flash", None)
 ss.setdefault("need_next", False)
+# Auch diese beiden nur einmal pro Sitzung aus der Datenbank holen und
+# danach mitzählen - sie stehen bloss in einer Bildunterschrift.
+if "reviews_today" not in ss:
+    ss.reviews_today = dbmod.reviews_today(conn)
+if "session_reviews" not in ss:
+    ss.session_reviews = [
+        (r["label"], r["fr"], r["de"]) for r in dbmod.recent_reviews(conn, 8)
+    ]
 ss.setdefault("rng", random.Random())
 
 
@@ -242,14 +272,32 @@ def next_card(cards) -> None:
         ss.recent = [card.id, *[i for i in ss.recent if i != card.id]][:12]
 
 
+def _karte_aendern(card_id: int, **felder) -> None:
+    """Zwischengespeicherte Karte nachziehen, statt die Tabelle neu zu lesen."""
+    ss.karten = [
+        replace(c, **felder) if c.id == card_id else c for c in ss.karten
+    ]
+
+
 def rate(card_id: int, label: str) -> None:
     """Bewertung speichern. Läuft als Rückruf, bevor die Seite neu aufgebaut wird.
 
     Die nächste Karte wird hier noch nicht gezogen - dafür braucht es die
-    aktuelle Kartenliste, die erst im Durchlauf danach geholt wird. Ein
-    Vermerk genügt.
+    Kartenliste in der Fassung *nach* dieser Bewertung. Ein Vermerk genügt.
     """
     dbmod.set_label(conn, card_id, label, ss.direction)
+    stempel = dbmod.now_iso()
+    alt = next((c for c in ss.karten if c.id == card_id), None)
+    _karte_aendern(
+        card_id,
+        label=label,
+        times_asked=(alt.times_asked + 1) if alt else 1,
+        last_asked_at=stempel,
+        last_labeled_at=stempel,
+    )
+    ss.reviews_today += 1
+    ss.session_reviews.insert(0, (label, alt.fr if alt else "", alt.de if alt else ""))
+    del ss.session_reviews[8:]
     ss.session_count += 1
     ss.flash = f"{LABEL_EMOJI[label]} als *{label}* gespeichert"
     ss.need_next = True
@@ -257,12 +305,8 @@ def rate(card_id: int, label: str) -> None:
 
 def skip(card_id: int) -> None:
     dbmod.mark_skipped(conn, card_id)
+    _karte_aendern(card_id, last_asked_at=dbmod.now_iso())
     ss.need_next = True
-
-
-def flip() -> None:
-    ss.direction = "de2fr" if ss.direction == "fr2de" else "fr2de"
-    ss.revealed = False
 
 
 def reveal() -> None:
@@ -354,6 +398,13 @@ with st.sidebar:
             except Exception as exc:  # pragma: no cover - Umgebungsfehler
                 st.error(f"git pull fehlgeschlagen: {exc}")
 
+    if st.button("🔄 Neu laden"):
+        # Der Zwischenspeicher wird lokal nachgeführt; wer an einem anderen
+        # Gerät gelernt hat, holt sich hier den aktuellen Stand.
+        for schluessel in ("karten", "reviews_today", "session_reviews", "weights_json"):
+            ss.pop(schluessel, None)
+        st.rerun()
+
     st.divider()
     with st.expander("Auswahl-Algorithmus"):
         st.caption(
@@ -414,8 +465,8 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Letzte Bewertungen")
-    for row in dbmod.recent_reviews(conn, 8):
-        st.caption(f"{LABEL_EMOJI[row['label']]} {row['fr']} → {row['de']}")
+    for label, fr, de in ss.session_reviews:
+        st.caption(f"{LABEL_EMOJI[label]} {fr} → {de}")
 
 
 # ------------------------------------------------------------------- Wörterliste
@@ -512,7 +563,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.caption(
-    f"{counts['total']} Vokabeln · heute bewertet: {dbmod.reviews_today(conn)}"
+    f"{counts['total']} Vokabeln · heute bewertet: {ss.reviews_today}"
     f" · diese Sitzung: {ss.session_count}"
 )
 
@@ -586,11 +637,7 @@ with tab_uebung:
                     args=(card.id, label),
                 )
 
-    s1, s2 = st.columns([1, 1])
-    with s1:
-        wide_button("⏭️ Überspringen", key="skip", on_click=skip, args=(card.id,))
-    with s2:
-        wide_button("🔁 Richtung drehen", key="flip", on_click=flip)
+    wide_button("⏭️ Überspringen", key="skip", on_click=skip, args=(card.id,))
 
     meta = [
         f"{LABEL_EMOJI[card.label]} {card.label or 'noch nicht gefragt'}",

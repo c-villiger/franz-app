@@ -27,13 +27,19 @@ Vorgehen:
    `--no-sync` überspringt den Datenbank-Abgleich – in einer Web-Session gibt
    es die lokale Datenbank des Nutzers ohnehin nicht.
 
-2. Danach prüfen und committen:
+2. Danach prüfen und **direkt auf `main`** committen – für reine
+   Vokabel-Ergänzungen keinen Branch und keinen Pull Request anlegen. Der
+   Nutzer will das so: die gehostete App deployt bei jedem Push auf `main`
+   von selbst, ein Umweg über einen PR würde das nur verzögern.
 
    ```bash
    python3 -m vocabtrainer.cli check
    git add vocab/vocab.jsonl && git commit -m "Vokabeln: +N Ausdrücke"
-   git push -u origin <branch>
+   git push origin main
    ```
+
+   Für Änderungen am Python-Code gilt das **nicht** – die gehen wie üblich
+   über einen Branch, ausser der Nutzer sagt ausdrücklich etwas anderes.
 
 3. Kurz zurückmelden, welche Einträge dazugekommen sind (und welche als
    Duplikat übersprungen wurden).
