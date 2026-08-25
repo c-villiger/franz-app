@@ -108,8 +108,9 @@ Das Dashboard hat zwei Tabs: **Üben** (die Abfrage) und **Wörterliste**
 
 Suchfeld (findet Französisch, Deutsch und Tags, ohne Rücksicht auf Akzente und
 Gross-/Kleinschreibung – `cote` findet `à côté de la plaque`), Filter nach
-Status und nach Tags, dazu eine sortierbare Tabelle mit Status, beiden
-Sprachen, Tags und der Zahl der Abfragen. Die Filter dort sind unabhängig vom
+Status und nach Tags, dazu eine sortierbare Tabelle mit
+Französisch, Deutsch, Tags, der Zahl der Abfragen und – ganz rechts – dem
+ausgeschriebenen Status. Die Filter dort sind unabhängig vom
 Tag-Filter in der Seitenleiste, der nur die Abfrage einschränkt.
 
 Eine Bewertung lässt sich jederzeit überschreiben – gespeichert wird immer die

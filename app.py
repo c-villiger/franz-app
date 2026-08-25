@@ -176,7 +176,9 @@ conn = get_conn(DB_URL, DB_TOKEN)
 # Die Gewichte kommen aus der Datenbank, nicht aus der Sitzung: so bleiben sie
 # nach einem Neustart erhalten und gelten gehostet auf allen Geräten.
 WEIGHTS = weights_from_json(dbmod.get_setting(conn, "weights"))
-WEIGHT_LABELS = {
+# Ausgeschriebene Bezeichnung je Status - genutzt in der Wörterliste und im
+# Einstellbereich für die Gewichte.
+LABEL_TEXT = {
     None: "⚪️ noch nicht gefragt",
     "unsicher": "🔴 unsicher",
     "mittel": "🟡 mittel",
@@ -311,7 +313,7 @@ with st.sidebar:
         neu: dict[str | None, float] = {}
         for label in WEIGHT_ORDER:
             neu[label] = st.slider(
-                WEIGHT_LABELS[label],
+                LABEL_TEXT[label],
                 min_value=0.0,
                 max_value=30.0,
                 value=float(WEIGHTS[label]),
@@ -329,7 +331,7 @@ with st.sidebar:
             for label in WEIGHT_ORDER:
                 if counts_for_weights[label]:
                     st.caption(
-                        f"  {WEIGHT_LABELS[label]} · {anteile[label] / gesamt * 100:.0f} %"
+                        f"  {LABEL_TEXT[label]} · {anteile[label] / gesamt * 100:.0f} %"
                         f"  ({counts_for_weights[label]} Karten)"
                     )
         else:
@@ -408,11 +410,11 @@ def woerterliste(cards, tag_options: list[str] | None = None) -> None:
     st.dataframe(
         [
             {
-                "": LABEL_EMOJI[c.label],
                 "Französisch": c.fr,
                 "Deutsch": c.de,
                 "Tags": ", ".join(c.tags),
                 "Gefragt": c.times_asked,
+                "Status": LABEL_TEXT[c.label],
             }
             for c in sorted(treffer, key=lambda c: normalize(c.fr))
         ],
@@ -420,8 +422,8 @@ def woerterliste(cards, tag_options: list[str] | None = None) -> None:
         width="stretch",
         height=min(620, 40 + 35 * len(treffer)),
         column_config={
-            "": st.column_config.TextColumn(width="small"),
             "Gefragt": st.column_config.NumberColumn(width="small"),
+            "Status": st.column_config.TextColumn(width="medium"),
         },
     )
 
