@@ -50,11 +50,17 @@ class TempPaths(unittest.TestCase):
     # den libSQL-Adapter laufen.
     BACKEND = "sqlite3"
 
+    def open_conn(self, path=None):
+        """Einzige Stelle, an der eine Verbindung entsteht - Unterklassen
+        hängen sich hier ein, um andere Treiber nachzustellen."""
+        conn = dbmod.connect(path or self.db, backend=self.BACKEND)
+        self.addCleanup(conn.close)
+        return conn
+
     def conn_with(self, entries):
         append_entries(entries, self.vocab)
-        conn = dbmod.connect(self.db, backend=self.BACKEND)
+        conn = self.open_conn()
         dbmod.sync_from_file(conn, load_entries(self.vocab))
-        self.addCleanup(conn.close)
         return conn
 
 
@@ -190,8 +196,7 @@ class TestDatabase(TempPaths):
         dbmod.set_label(conn, card.id, "unsicher")
         conn.close()
 
-        conn2 = dbmod.connect(self.db, backend=self.BACKEND)
-        self.addCleanup(conn2.close)
+        conn2 = self.open_conn()
         dbmod.sync_from_file(conn2, load_entries(self.vocab))
         self.assertEqual(dbmod.all_cards(conn2)[0].label, "unsicher")
 
@@ -216,9 +221,55 @@ class TestDatabaseLibsql(TestDatabase):
     def test_creates_the_directory_of_a_fresh_database(self):
         # libSQL legt fehlende Verzeichnisse - anders als sqlite3 - nicht an.
         fresh = self.tmp / "noch" / "nicht" / "da" / "vocab.db"
-        conn = dbmod.connect(fresh, backend=self.BACKEND)
-        self.addCleanup(conn.close)
+        self.open_conn(fresh)
         self.assertTrue(fresh.exists())
+
+
+class _CursorOhneSpaltennamen:
+    """Cursor, der Zeilen liefert, aber keine Metadaten - so verhielt sich die
+    gehostete Turso-Verbindung. Lokal meldet derselbe Client die Spalten."""
+
+    description = None
+
+    def __init__(self, cursor) -> None:
+        self._cursor = cursor
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class _VerbindungOhneSpaltennamen:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql, parameters=()):
+        return _CursorOhneSpaltennamen(self._conn.execute(sql, parameters))
+
+    def executescript(self, script):
+        self._conn.executescript(script)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+class TestDatabaseOhneSpaltennamen(TestDatabaseLibsql):
+    """Der Fehler, der erst gegen echtes Turso auftrat.
+
+    Dort kamen die Zeilen an, aber ohne Spaltennamen - jedes row["key"] lief
+    ins Leere. Hier läuft die gesamte Suite noch einmal gegen einen Treiber,
+    der genau das tut; die Namen müssen dann aus der Abfrage selbst kommen.
+    """
+
+    def open_conn(self, path=None):
+        conn = super().open_conn(path)
+        conn._conn = _VerbindungOhneSpaltennamen(conn._conn)
+        return conn
 
 
 class TestNamedRow(unittest.TestCase):

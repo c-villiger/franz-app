@@ -24,6 +24,7 @@ Der libSQL-Client liefert Zeilen als nackte Tupel und kennt keine
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,13 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .config import DB_PATH, DB_TOKEN, DB_URL, LABELS
+
+# Ausgeschrieben statt "SELECT *": nur so lassen sich die Spaltennamen im
+# Notfall aus der Abfrage selbst ableiten (siehe _columns_from_sql).
+CARD_COLUMNS = (
+    "id, key, fr, de, tags, note, label, times_asked,"
+    " last_asked_at, last_labeled_at, created_at, active"
+)
 from .vocab_file import Entry, load_entries
 
 SCHEMA = """
@@ -153,7 +161,10 @@ class _NamedRow:
             try:
                 return self._values[self._columns[key]]
             except KeyError:
-                raise KeyError(f"Unbekannte Spalte: {key!r}") from None
+                bekannt = ", ".join(self._columns) or "keine"
+                raise KeyError(
+                    f"Unbekannte Spalte: {key!r} (vorhanden: {bekannt})"
+                ) from None
         return self._values[key]
 
     def keys(self) -> list[str]:
@@ -166,18 +177,72 @@ class _NamedRow:
         return f"_NamedRow({dict(zip(self._columns, self._values))!r})"
 
 
+def _columns_from_description(description) -> dict[str, int]:
+    """Spaltennamen aus den Metadaten des Cursors.
+
+    Treiber sind sich uneinig, was in ``description`` steht: meist Tupel nach
+    DB-API, manchmal blosse Strings, und Namen koennen als ``tabelle.spalte``
+    kommen. Alles drei wird hier auf den nackten Spaltennamen gebracht.
+    """
+    columns: dict[str, int] = {}
+    for position, entry in enumerate(description or ()):
+        name = entry if isinstance(entry, str) else (entry[0] if entry else "")
+        if not name:
+            return {}
+        columns[str(name).split(".")[-1].strip('"')] = position
+    return columns
+
+
+_SELECT = re.compile(r"^\s*SELECT\s+(.*?)\s+FROM\s", re.IGNORECASE | re.DOTALL)
+
+
+def _columns_from_sql(sql: str) -> dict[str, int]:
+    """Spaltennamen notfalls aus dem SELECT selbst ableiten.
+
+    Die gehostete Verbindung lieferte keine brauchbare ``description``, wohl
+    aber die Zeilen - ohne diesen Notnagel waere jeder Zugriff ueber den
+    Spaltennamen ins Leere gelaufen. Deshalb steht in diesem Modul auch kein
+    ``SELECT *`` mehr: nur bei ausgeschriebenen Spalten ist das hier verlaesslich.
+    """
+    match = _SELECT.match(sql)
+    if not match:
+        return {}
+    columns: dict[str, int] = {}
+    for position, part in enumerate(match.group(1).split(",")):
+        part = part.strip()
+        # Ein Komma innerhalb von Klammern - COALESCE(a, b) - wuerde die
+        # Aufteilung zerlegen. Kommt hier nicht vor; falls doch, lieber nichts
+        # zurueckgeben als etwas Falsches.
+        if part.count("(") != part.count(")"):
+            return {}
+        alias = re.split(r"\s+AS\s+", part, flags=re.IGNORECASE)
+        name = alias[-1].split(".")[-1].strip().strip('"')
+        if not name or name == "*":
+            return {}
+        columns[name] = position
+    return columns
+
+
 class _LibsqlCursor:
     """Cursor, dessen Zeilen sich wie ``sqlite3.Row`` verhalten."""
 
-    def __init__(self, cursor) -> None:
+    def __init__(self, cursor, sql: str = "") -> None:
         self._cursor = cursor
-        self._columns = {
-            description[0]: position
-            for position, description in enumerate(cursor.description or ())
-        }
+        self._sql = sql
+        self._known: dict[str, int] | None = None
+
+    def _columns(self) -> dict[str, int]:
+        # Erst nach dem Holen der Zeilen abfragen: manche Treiber fuellen
+        # description erst dann. Ergebnis merken, damit es pro Cursor einmal
+        # ermittelt wird.
+        if self._known is None:
+            self._known = _columns_from_description(
+                getattr(self._cursor, "description", None)
+            ) or _columns_from_sql(self._sql)
+        return self._known
 
     def _wrap(self, values):
-        return None if values is None else _NamedRow(values, self._columns)
+        return None if values is None else _NamedRow(values, self._columns())
 
     def fetchone(self):
         return self._wrap(self._cursor.fetchone())
@@ -196,7 +261,7 @@ class _LibsqlConnection:
         self._conn = conn
 
     def execute(self, sql: str, parameters: Sequence = ()) -> _LibsqlCursor:
-        return _LibsqlCursor(self._conn.execute(sql, tuple(parameters)))
+        return _LibsqlCursor(self._conn.execute(sql, tuple(parameters)), sql)
 
     def executescript(self, script: str) -> None:
         self._conn.executescript(script)
@@ -330,7 +395,7 @@ def all_cards(
     tags: Sequence[str] | None = None,
     include_inactive: bool = False,
 ) -> list[Card]:
-    sql = "SELECT * FROM cards"
+    sql = f"SELECT {CARD_COLUMNS} FROM cards"
     if not include_inactive:
         sql += " WHERE active = 1"
     cards = [Card.from_row(row) for row in conn.execute(sql)]
@@ -341,7 +406,9 @@ def all_cards(
 
 
 def get_card(conn, card_id: int) -> Card | None:
-    row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    row = conn.execute(
+        f"SELECT {CARD_COLUMNS} FROM cards WHERE id = ?", (card_id,)
+    ).fetchone()
     return Card.from_row(row) if row else None
 
 
