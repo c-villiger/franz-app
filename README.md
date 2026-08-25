@@ -10,7 +10,7 @@ SQLite-Datenbank und geht beim Hinzufügen nie verloren.
 
 ---
 
-## Schnellstart
+## Schnellstart (macOS, Linux, WSL, Git Bash)
 
 ```bash
 git clone <dieses-repo>
@@ -18,18 +18,41 @@ cd franz-app
 ./run.sh
 ```
 
-`run.sh` legt beim ersten Mal eine virtuelle Umgebung an, installiert
-Streamlit und öffnet das Dashboard auf <http://localhost:8501>.
+`run.sh` legt beim ersten Mal eine virtuelle Umgebung unter `.venv` an,
+installiert dort Streamlit und startet das Dashboard. Der Browser öffnet sich
+von selbst; sonst <http://localhost:8501> aufrufen.
 
-Ohne das Skript geht es genauso:
+## Ohne das Skript (z.B. Windows-PowerShell)
 
-```bash
+Der Umweg über eine virtuelle Umgebung lohnt sich auch von Hand: `pip install`
+ohne aktives `.venv` schreibt Streamlit und rund dreissig Abhängigkeiten in die
+globale Python-Installation – und auf aktuellem macOS (Homebrew) sowie
+Debian/Ubuntu bricht pip dort ohnehin mit `externally-managed-environment` ab.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Weil `run.sh` an `0.0.0.0` bindet, ist das Dashboard auch vom Handy im
-gleichen WLAN erreichbar: `http://<IP-des-Rechners>:8501`.
+Unter macOS/Linux dasselbe mit `python3 -m venv .venv` und
+`source .venv/bin/activate`. Statt zu aktivieren geht auch direkt
+`.venv/bin/streamlit run app.py` (Windows: `.venv\Scripts\streamlit run app.py`) –
+so macht es `run.sh`.
+
+## Vom Handy im gleichen WLAN
+
+Streamlit gibt beim Start zwei Adressen aus:
+
+```
+Local URL:   http://localhost:8501      ← nur auf dem Rechner selbst
+Network URL: http://192.168.x.x:8501    ← diese aufs Handy
+```
+
+`localhost` zeigt auf dem Handy auf das Handy selbst – es braucht die
+**Network URL**. Die funktioniert, weil `run.sh` an `0.0.0.0` bindet; von Hand
+gestartet dafür `streamlit run app.py --server.address 0.0.0.0` verwenden.
 
 ---
 
