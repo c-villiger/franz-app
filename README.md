@@ -18,13 +18,39 @@ cd franz-app
 ./run.sh
 ```
 
-`run.sh` legt beim ersten Mal eine virtuelle Umgebung unter `.venv` an,
-installiert dort die Abhängigkeiten und startet das Dashboard. Der Browser
+`run.sh` sucht sich ein passendes Python (`py -3`, `python3` oder `python`),
+legt beim ersten Mal eine virtuelle Umgebung unter `.venv` an, installiert
+dort die Abhängigkeiten und startet das Dashboard. Der Browser
 öffnet sich von selbst; sonst <http://localhost:8501> aufrufen.
 
 Bei jedem weiteren Start vergleicht das Skript `requirements.txt` mit dem
 Stand in der `.venv` und installiert nur nach, wenn sich etwas geändert hat –
 nach einem `git pull` mit neuen Paketen läuft es also ohne Zutun weiter.
+
+### Windows: „Python wurde nicht gefunden"
+
+Meldet sich beim Start der Microsoft Store, ist das **kein** Hinweis darauf,
+dass Python fehlt. Windows legt für `python` und `python3` Platzhalter im
+Suchpfad ab, die nur auf den Store verweisen – und der Python-Installer von
+python.org richtet `python.exe` und `py.exe` ein, aber kein `python3.exe`.
+Der Platzhalter bleibt also aktiv und wird als Erstes gefunden.
+
+`run.sh` probiert deshalb jeden Kandidaten aus, statt sich auf den Namen zu
+verlassen, und überspringt den Platzhalter. Kommt die Meldung trotzdem, ist
+tatsächlich kein Python installiert:
+
+```powershell
+py -V          # gibt eine Versionsnummer aus, wenn Python da ist
+```
+
+Fehlt es, von <https://www.python.org/downloads/> installieren und dabei
+**„Add python.exe to PATH"** ankreuzen. Alternativ die Platzhalter abschalten
+unter *Einstellungen → Apps → Erweiterte App-Einstellungen →
+App-Ausführungsaliase*. Liegt Python an einer bekannten Stelle, geht auch:
+
+```bash
+PYTHON="C:/Users/DeinName/AppData/Local/Programs/Python/Python312/python.exe" ./run.sh
+```
 
 ## Ohne das Skript (z.B. Windows-PowerShell)
 
@@ -34,11 +60,13 @@ globale Python-Installation – und auf aktuellem macOS (Homebrew) sowie
 Debian/Ubuntu bricht pip dort ohnehin mit `externally-managed-environment` ab.
 
 ```powershell
-python -m venv .venv
+py -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+(`py` statt `python3` – siehe den Hinweis oben.)
 
 Unter macOS/Linux dasselbe mit `python3 -m venv .venv` und
 `source .venv/bin/activate`. Statt zu aktivieren geht auch direkt
