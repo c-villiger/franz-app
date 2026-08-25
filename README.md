@@ -1,0 +1,154 @@
+# 🇫🇷 Französisch-Vokabeltrainer
+
+Ein kleines, lokal laufendes Dashboard zum Üben französischer Ausdrücke mit
+deutschen Übersetzungen – im Stil von Anki, aber auf das Nötigste reduziert:
+eine Karte, drei Knöpfe (**sicher · mittel · unsicher**) und ein Zähler oben.
+
+Neue Vokabeln kommen als Zeile in `vocab/vocab.jsonl` – das kann Claude vom
+Handy aus erledigen; der Fortschritt liegt getrennt davon in einer lokalen
+SQLite-Datenbank und geht beim Hinzufügen nie verloren.
+
+---
+
+## Schnellstart
+
+```bash
+git clone <dieses-repo>
+cd franz-app
+./run.sh
+```
+
+`run.sh` legt beim ersten Mal eine virtuelle Umgebung an, installiert
+Streamlit und öffnet das Dashboard auf <http://localhost:8501>.
+
+Ohne das Skript geht es genauso:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Weil `run.sh` an `0.0.0.0` bindet, ist das Dashboard auch vom Handy im
+gleichen WLAN erreichbar: `http://<IP-des-Rechners>:8501`.
+
+---
+
+## Bedienung
+
+| Element | Bedeutung |
+|---|---|
+| Zähler oben | Wie viele Vokabeln sind 🟢 sicher, 🟡 mittel, 🔴 unsicher, ⚪️ noch nicht gefragt |
+| Karte | Zeigt je nach Richtung den französischen **oder** den deutschen Ausdruck |
+| 👁️ Antwort zeigen | Blendet die Übersetzung ein (Tastenkürzel: `Leertaste`) |
+| 🟢 / 🟡 / 🔴 | Bewertung speichern und nächste Karte ziehen (Kürzel `1` / `2` / `3`) |
+| ⏭️ Überspringen | Nächste Karte, ohne zu bewerten |
+| 🔁 Richtung drehen | Diese Karte in der anderen Richtung ansehen |
+| Seitenleiste | Abfragerichtung, Tag-Filter, Vokabeln hinzufügen, `git pull`, Zurücksetzen |
+
+Eine Bewertung lässt sich jederzeit überschreiben – gespeichert wird immer die
+letzte, und jede einzelne Bewertung landet zusätzlich in einer Historie.
+
+---
+
+## Vokabeln hinzufügen
+
+### Vom Handy aus, per Claude (der eigentliche Zweck)
+
+Claude auf dem Handy öffnen, dieses Repo als Kontext wählen und schreiben:
+
+> Füge diese Vokabeln hinzu: *tomber dans les pommes*, *poser un lapin*
+
+Claude hängt die Zeilen an `vocab/vocab.jsonl` an und pusht. Auf dem Rechner
+dann in der Seitenleiste **„git pull“** drücken (oder selbst `git pull`) – die
+neuen Wörter sind sofort in der Abfrage, der bisherige Fortschritt bleibt.
+
+Die genaue Anleitung dafür steht in [`CLAUDE.md`](CLAUDE.md).
+
+### In der Seitenleiste des Dashboards
+
+Eine Vokabel pro Zeile, Trennzeichen `|`, `=` oder `->`:
+
+```
+avoir le cafard | Trübsal blasen | idiom
+poser un lapin  | jemanden versetzen
+```
+
+### Auf der Kommandozeile
+
+```bash
+python3 -m vocabtrainer.cli add "jeter l'éponge | das Handtuch werfen | idiom"
+
+python3 -m vocabtrainer.cli add --tag alltag - <<'EOF'
+Ça te dit ?      | Hast du Lust?
+Je n'en peux plus | Ich kann nicht mehr
+EOF
+
+python3 -m vocabtrainer.cli check           # Datei validieren
+python3 -m vocabtrainer.cli sync            # Datenbank abgleichen
+python3 -m vocabtrainer.cli stats           # Zähler anzeigen
+python3 -m vocabtrainer.cli list --label unsicher
+```
+
+---
+
+## Wie die Auswahl funktioniert
+
+Die nächste Karte wird **zufällig gezogen, aber gewichtet** – ähnlich wie bei
+Anki, nur ohne Intervall-Rechnerei:
+
+| Zustand | Grundgewicht | kommt … |
+|---|---|---|
+| ⚪️ noch nicht gefragt | 24 | am häufigsten |
+| 🔴 unsicher | 12 | oft |
+| 🟡 mittel | 5 | gelegentlich |
+| 🟢 sicher | 1 | selten – aber nie „nie“ |
+
+Zwei Zusätze:
+
+* **Abklingzeit** – gerade bewertete Karten werden kurz abgewertet (unsicher 3 h,
+  mittel 12 h, sicher 48 h), maximal aber auf 15 % ihres Gewichts. Auch eine
+  kleine Liste bleibt dadurch spielbar.
+* **Keine Wiederholung** – die zuletzt gezeigte Karte kommt nie direkt noch
+  einmal; die davor gezeigten sind stark abgewertet.
+
+Nachzulesen und anzupassen in [`vocabtrainer/scheduler.py`](vocabtrainer/scheduler.py).
+
+---
+
+## Aufbau
+
+```
+app.py                     Streamlit-Dashboard
+run.sh                     Startskript (venv + streamlit run)
+vocab/vocab.jsonl          Vokabelliste – Quelle der Wahrheit, versioniert
+data/vocab.db              Fortschritt (SQLite) – lokal, nicht versioniert
+vocabtrainer/
+  config.py                Pfade und Konstanten
+  vocab_file.py            Vokabeldatei lesen/schreiben, Duplikat-Erkennung
+  db.py                    Schema, Abgleich Datei→DB, Labels, Statistik
+  scheduler.py             gewichtete Zufallsauswahl
+  cli.py                   Kommandozeile (add / check / sync / stats / list)
+tests/                     Tests (unittest, ohne Zusatzabhängigkeiten)
+```
+
+**Trennung von Wörtern und Fortschritt:** die Vokabelliste liegt im Repo und
+wird geteilt, der Lernstand bleibt auf dem jeweiligen Gerät. Beim Start
+gleicht das Dashboard beides ab: neue Zeilen werden angelegt, korrigierte
+Übersetzungen übernommen (Label bleibt erhalten), gelöschte Zeilen nur
+deaktiviert – so überlebt die Historie auch ein versehentliches Löschen.
+
+Format von `vocab/vocab.jsonl` – eine JSON-Zeile pro Vokabel:
+
+```json
+{"fr": "avoir le cafard", "de": "Trübsal blasen", "tags": ["idiom"]}
+```
+
+Pflicht sind `fr` und `de`; `tags` und `note` sind optional.
+
+---
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```

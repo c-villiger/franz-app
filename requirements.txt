@@ -1,0 +1,2 @@
+# Dashboard. Der Rest (SQLite, JSON) kommt aus der Python-Standardbibliothek.
+streamlit>=1.49
