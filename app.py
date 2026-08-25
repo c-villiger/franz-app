@@ -51,8 +51,23 @@ _SUPPORTS_SHORTCUT = "shortcut" in _BTN_PARAMS
 _SUPPORTS_WIDTH = "width" in _BTN_PARAMS
 
 
-def wide_button(label: str, *, key: str, kind: str = "secondary", shortcut: str | None = None):
+def wide_button(
+    label: str,
+    *,
+    key: str,
+    kind: str = "secondary",
+    shortcut: str | None = None,
+    on_click=None,
+    args: tuple = (),
+):
     kwargs: dict = {"key": key, "type": kind}
+    if on_click is not None:
+        # Rückruf statt Rückgabewert: er läuft VOR dem Skriptdurchlauf, das
+        # Ergebnis wird also im selben Durchlauf angezeigt. Ausgewertet wie
+        # bisher bräuchte es einen zweiten Durchlauf - bei einer gehosteten
+        # Datenbank doppelt so viele Netzwerk-Roundtrips.
+        kwargs["on_click"] = on_click
+        kwargs["args"] = args
     if _SUPPORTS_WIDTH:
         kwargs["width"] = "stretch"
     else:  # pragma: no cover - alte Streamlit-Versionen
@@ -173,9 +188,20 @@ def get_conn(url: str, token: str):
 
 conn = get_conn(DB_URL, DB_TOKEN)
 
+# Alles, was aus der Datenbank kommt, wird EINMAL pro Skriptdurchlauf geholt
+# und danach im Speicher weiterverwendet. Gehostet ist jede Abfrage ein
+# Netzwerk-Roundtrip; vorher wurde dieselbe Kartentabelle bis zu sieben Mal
+# pro Klick gelesen, was das Dashboard spürbar träge machte.
+ALLE_KARTEN = dbmod.all_cards(conn)
+KARTE_NACH_ID = {c.id: c for c in ALLE_KARTEN}
+ALLE_TAGS = sorted({t for c in ALLE_KARTEN for t in c.tags})
+
 # Die Gewichte kommen aus der Datenbank, nicht aus der Sitzung: so bleiben sie
-# nach einem Neustart erhalten und gelten gehostet auf allen Geräten.
-WEIGHTS = weights_from_json(dbmod.get_setting(conn, "weights"))
+# nach einem Neustart erhalten und gelten gehostet auf allen Geräten. Innerhalb
+# einer Sitzung genügt es, sie einmal zu lesen.
+if "weights_json" not in st.session_state:
+    st.session_state["weights_json"] = dbmod.get_setting(conn, "weights") or ""
+WEIGHTS = weights_from_json(st.session_state["weights_json"])
 # Ausgeschriebene Bezeichnung je Status - genutzt in der Wörterliste und im
 # Einstellbereich für die Gewichte.
 LABEL_TEXT = {
@@ -194,11 +220,16 @@ ss.setdefault("mode", "mixed")       # Abfragerichtung
 ss.setdefault("tag_filter", [])
 ss.setdefault("session_count", 0)
 ss.setdefault("flash", None)
+ss.setdefault("need_next", False)
 ss.setdefault("rng", random.Random())
 
 
 def deck() -> list:
-    return dbmod.all_cards(conn, tags=ss.tag_filter or None)
+    """Karten für die Abfrage - im Speicher gefiltert, ohne neue Abfrage."""
+    if not ss.tag_filter:
+        return ALLE_KARTEN
+    gesucht = {t.lower() for t in ss.tag_filter}
+    return [c for c in ALLE_KARTEN if gesucht & {t.lower() for t in c.tags}]
 
 
 def next_card(cards) -> None:
@@ -211,15 +242,35 @@ def next_card(cards) -> None:
         ss.recent = [card.id, *[i for i in ss.recent if i != card.id]][:12]
 
 
-def rate(card_id: int, label: str, cards) -> None:
+def rate(card_id: int, label: str) -> None:
+    """Bewertung speichern. Läuft als Rückruf, bevor die Seite neu aufgebaut wird.
+
+    Die nächste Karte wird hier noch nicht gezogen - dafür braucht es die
+    aktuelle Kartenliste, die erst im Durchlauf danach geholt wird. Ein
+    Vermerk genügt.
+    """
     dbmod.set_label(conn, card_id, label, ss.direction)
     ss.session_count += 1
     ss.flash = f"{LABEL_EMOJI[label]} als *{label}* gespeichert"
-    next_card(cards)
+    ss.need_next = True
+
+
+def skip(card_id: int) -> None:
+    dbmod.mark_skipped(conn, card_id)
+    ss.need_next = True
+
+
+def flip() -> None:
+    ss.direction = "de2fr" if ss.direction == "fr2de" else "fr2de"
+    ss.revealed = False
+
+
+def reveal() -> None:
+    ss.revealed = True
 
 
 # Zähler pro Gruppe, für die Anteilsanzeige im Einstellbereich.
-_counts = dbmod.stats(conn)
+_counts = dbmod.stats(conn, ALLE_KARTEN)
 counts_for_weights = {
     None: _counts["unseen"],
     "unsicher": _counts["unsicher"],
@@ -253,9 +304,8 @@ with st.sidebar:
         index=modes.index(ss.mode),
         format_func=lambda m: DIRECTION_LABELS[m],
     )
-    tags = dbmod.all_tags(conn)
-    if tags:
-        ss.tag_filter = st.multiselect("Nur diese Tags", tags, default=ss.tag_filter)
+    if ALLE_TAGS:
+        ss.tag_filter = st.multiselect("Nur diese Tags", ALLE_TAGS, default=ss.tag_filter)
 
     st.divider()
     st.subheader("Vokabeln hinzufügen")
@@ -340,11 +390,14 @@ with st.sidebar:
         c_speichern, c_zurueck = st.columns(2)
         with c_speichern:
             if st.button("Speichern", type="primary"):
-                dbmod.set_setting(conn, "weights", weights_to_json(neu))
+                gespeichert = weights_to_json(neu)
+                dbmod.set_setting(conn, "weights", gespeichert)
+                ss["weights_json"] = gespeichert
                 st.rerun()
         with c_zurueck:
             if st.button("Standard"):
                 dbmod.delete_setting(conn, "weights")
+                ss["weights_json"] = ""
                 for label in WEIGHT_ORDER:
                     ss.pop(f"weight_{label or 'unseen'}", None)
                 st.rerun()
@@ -480,11 +533,17 @@ if not cards:
         woerterliste(dbmod.all_cards(conn))
     st.stop()
 
-card = dbmod.get_card(conn, ss.current_id) if ss.current_id else None
-if card is None or card.id not in {c.id for c in cards}:
+karten_ids = {c.id for c in cards}
+if ss.need_next:
+    # Ein Knopfdruck hat eben bewertet oder übersprungen.
+    ss.need_next = False
+    next_card(cards)
+
+card = KARTE_NACH_ID.get(ss.current_id)
+if card is None or card.id not in karten_ids:
     # Erste Karte, oder die aktuelle passt nicht mehr zum Tag-Filter.
     next_card(cards)
-    card = dbmod.get_card(conn, ss.current_id)
+    card = KARTE_NACH_ID.get(ss.current_id)
 
 # Richtung in der Seitenleiste umgestellt -> sofort auf diese Karte anwenden.
 if ss.mode != "mixed" and ss.direction != ss.mode:
@@ -508,38 +567,30 @@ with tab_uebung:
     )
 
     if not ss.revealed:
-        if wide_button("👁️ Antwort zeigen", key="reveal", shortcut="space"):
-            ss.revealed = True
-            st.rerun()
+        wide_button("👁️ Antwort zeigen", key="reveal", shortcut="space", on_click=reveal)
     else:
         st.caption("Wie sicher warst du?")
 
     with keyed_container("rating"):
         b1, b2, b3 = st.columns(3)
-        with b1:
-            if wide_button("🟢 sicher", key="b_sicher", shortcut="1"):
-                rate(card.id, "sicher", cards)
-                st.rerun()
-        with b2:
-            if wide_button("🟡 mittel", key="b_mittel", shortcut="2"):
-                rate(card.id, "mittel", cards)
-                st.rerun()
-        with b3:
-            if wide_button("🔴 unsicher", key="b_unsicher", shortcut="3"):
-                rate(card.id, "unsicher", cards)
-                st.rerun()
+        for spalte, (text, label, taste) in zip(
+            (b1, b2, b3),
+            (("🟢 sicher", "sicher", "1"), ("🟡 mittel", "mittel", "2"), ("🔴 unsicher", "unsicher", "3")),
+        ):
+            with spalte:
+                wide_button(
+                    text,
+                    key=f"b_{label}",
+                    shortcut=taste,
+                    on_click=rate,
+                    args=(card.id, label),
+                )
 
     s1, s2 = st.columns([1, 1])
     with s1:
-        if wide_button("⏭️ Überspringen", key="skip"):
-            dbmod.mark_skipped(conn, card.id)
-            next_card(cards)
-            st.rerun()
+        wide_button("⏭️ Überspringen", key="skip", on_click=skip, args=(card.id,))
     with s2:
-        if wide_button("🔁 Richtung drehen", key="flip"):
-            ss.direction = "de2fr" if ss.direction == "fr2de" else "fr2de"
-            ss.revealed = False
-            st.rerun()
+        wide_button("🔁 Richtung drehen", key="flip", on_click=flip)
 
     meta = [
         f"{LABEL_EMOJI[card.label]} {card.label or 'noch nicht gefragt'}",
@@ -556,4 +607,4 @@ with tab_uebung:
 with tab_liste:
     # Bewusst alle Karten, nicht die vom Tag-Filter fürs Üben reduzierten:
     # die Liste hat ihre eigenen Filter.
-    woerterliste(dbmod.all_cards(conn), tag_options=dbmod.all_tags(conn))
+    woerterliste(ALLE_KARTEN, tag_options=ALLE_TAGS)
