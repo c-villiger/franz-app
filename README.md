@@ -27,31 +27,6 @@ Bei jedem weiteren Start vergleicht das Skript `requirements.txt` mit dem
 Stand in der `.venv` und installiert nur nach, wenn sich etwas geändert hat –
 nach einem `git pull` mit neuen Paketen läuft es also ohne Zutun weiter.
 
-### Windows: „Python wurde nicht gefunden"
-
-Meldet sich beim Start der Microsoft Store, ist das **kein** Hinweis darauf,
-dass Python fehlt. Windows legt für `python` und `python3` Platzhalter im
-Suchpfad ab, die nur auf den Store verweisen – und der Python-Installer von
-python.org richtet `python.exe` und `py.exe` ein, aber kein `python3.exe`.
-Der Platzhalter bleibt also aktiv und wird als Erstes gefunden.
-
-`run.sh` probiert deshalb jeden Kandidaten aus, statt sich auf den Namen zu
-verlassen, und überspringt den Platzhalter. Kommt die Meldung trotzdem, ist
-tatsächlich kein Python installiert:
-
-```powershell
-py -V          # gibt eine Versionsnummer aus, wenn Python da ist
-```
-
-Fehlt es, von <https://www.python.org/downloads/> installieren und dabei
-**„Add python.exe to PATH"** ankreuzen. Alternativ die Platzhalter abschalten
-unter *Einstellungen → Apps → Erweiterte App-Einstellungen →
-App-Ausführungsaliase*. Liegt Python an einer bekannten Stelle, geht auch:
-
-```bash
-PYTHON="C:/Users/DeinName/AppData/Local/Programs/Python/Python312/python.exe" ./run.sh
-```
-
 ## Ohne das Skript (z.B. Windows-PowerShell)
 
 Der Umweg über eine virtuelle Umgebung lohnt sich auch von Hand: `pip install`
@@ -65,8 +40,6 @@ py -m venv .venv
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-(`py` statt `python3` – siehe den Hinweis oben.)
 
 Unter macOS/Linux dasselbe mit `python3 -m venv .venv` und
 `source .venv/bin/activate`. Statt zu aktivieren geht auch direkt
