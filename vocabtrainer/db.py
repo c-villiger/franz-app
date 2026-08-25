@@ -265,20 +265,63 @@ class _LibsqlCursor:
         return iter(self.fetchall())
 
 
-class _LibsqlConnection:
-    """``sqlite3``-aehnliche Fassade um eine libSQL-Verbindung."""
+# Meldungen, mit denen eine gehostete libSQL-Datenbank sagt, dass die
+# serverseitige Sitzung nicht mehr existiert. Sie verfaellt, wenn sie eine
+# Weile ungenutzt bleibt - und das Dashboard haelt seine Verbindung ueber
+# Stunden offen, waehrend es dank Zwischenspeicher lange nichts abfragt.
+_VERLORENE_SITZUNG = (
+    "stream not found",
+    "stream expired",
+    "stream closed",
+    "baton",
+)
 
-    def __init__(self, conn) -> None:
-        self._conn = conn
+
+def _sitzung_verloren(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(hinweis in text for hinweis in _VERLORENE_SITZUNG)
+
+
+class _LibsqlConnection:
+    """``sqlite3``-aehnliche Fassade um eine libSQL-Verbindung.
+
+    Baut sich selbst neu auf, wenn die gehostete Gegenstelle die Sitzung
+    hat verfallen lassen. Ohne das stirbt das Dashboard beim ersten Zugriff
+    nach einer laengeren Pause - und bleibt tot, weil die Verbindung
+    zwischengespeichert ist und niemand sie erneuert.
+    """
+
+    def __init__(self, target: str, token: str = "") -> None:
+        self._target = target
+        self._token = token
+        self._conn = self._verbinden()
+
+    def _verbinden(self):
+        import libsql
+
+        return libsql.connect(self._target, auth_token=self._token)
+
+    def _erneut(self, aktion, *args):
+        """Aktion ausfuehren; bei verfallener Sitzung einmal neu verbinden."""
+        try:
+            return aktion(self._conn, *args)
+        except Exception as exc:
+            if not _sitzung_verloren(exc):
+                raise
+            self._conn = self._verbinden()
+            return aktion(self._conn, *args)
 
     def execute(self, sql: str, parameters: Sequence = ()) -> _LibsqlCursor:
-        return _LibsqlCursor(self._conn.execute(sql, tuple(parameters)), sql)
+        cursor = self._erneut(
+            lambda conn, s, p: conn.execute(s, p), sql, tuple(parameters)
+        )
+        return _LibsqlCursor(cursor, sql)
 
     def executescript(self, script: str) -> None:
-        self._conn.executescript(script)
+        self._erneut(lambda conn, s: conn.executescript(s), script)
 
     def commit(self) -> None:
-        self._conn.commit()
+        self._erneut(lambda conn: conn.commit())
 
     def close(self) -> None:
         self._conn.close()
@@ -286,13 +329,13 @@ class _LibsqlConnection:
 
 def _connect_libsql(target: str, token: str = "") -> _LibsqlConnection:
     try:
-        import libsql
+        import libsql  # noqa: F401
     except ImportError as exc:  # pragma: no cover - fehlendes Paket
         raise RuntimeError(
             "Für eine gehostete Datenbank fehlt das Paket 'libsql'. "
             "Installieren mit: pip install -r requirements.txt"
         ) from exc
-    return _LibsqlConnection(libsql.connect(target, auth_token=token))
+    return _LibsqlConnection(target, token)
 
 
 def _prepared_path(db_path: Path | str | None) -> Path:

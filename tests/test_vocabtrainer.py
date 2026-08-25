@@ -273,6 +273,66 @@ class _VerbindungOhneSpaltennamen:
         self._conn.close()
 
 
+class TestVerlorenerStream(TempPaths):
+    """Die gehostete Datenbank lässt ihre Sitzung verfallen.
+
+    Turso beendet den serverseitigen Stream, wenn er eine Weile ungenutzt
+    bleibt. Weil das Dashboard seine Verbindung zwischenspeichert und dank
+    des Karten-Zwischenspeichers lange nichts abfragt, passiert genau das -
+    und ohne Selbstheilung bliebe die App dauerhaft tot.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        try:
+            import libsql  # noqa: F401
+        except ImportError:  # pragma: no cover
+            self.skipTest("Paket 'libsql' ist nicht installiert")
+
+    def test_erkennt_verlorene_sitzung(self):
+        self.assertTrue(dbmod._sitzung_verloren(
+            ValueError('Hrana: `api error: `status=404 Not Found, '
+                       'body={"error":"stream not found: ed4c194d:3110907"}`')))
+        self.assertTrue(dbmod._sitzung_verloren(ValueError("stream expired")))
+        self.assertFalse(dbmod._sitzung_verloren(ValueError("no such table: cards")))
+        self.assertFalse(dbmod._sitzung_verloren(ValueError("UNIQUE constraint failed")))
+
+    def test_verbindet_nach_verlorener_sitzung_neu(self):
+        append_entries([Entry("a", "A"), Entry("b", "B")], self.vocab)
+        conn = dbmod.connect(self.db, backend="libsql")
+        self.addCleanup(conn.close)
+        dbmod.sync_from_file(conn, load_entries(self.vocab))
+
+        echt = conn._conn
+        versuche = []
+
+        class SitzungVerfallen:
+            """Wirft beim ersten Zugriff, danach geht es wieder."""
+
+            def __getattr__(self, name):
+                def gescheitert(*args, **kwargs):
+                    versuche.append(name)
+                    raise ValueError(
+                        'Hrana: `api error: `status=404 Not Found, '
+                        'body={"error":"stream not found: abc:123"}`'
+                    )
+                return gescheitert
+
+        conn._conn = SitzungVerfallen()
+        conn._verbinden = lambda: echt  # der Neuaufbau liefert die gute Verbindung
+
+        # Muss trotzdem durchlaufen - genau das schlug in der Cloud fehl.
+        self.assertEqual(len(dbmod.all_cards(conn)), 2)
+        self.assertEqual(versuche, ["execute"], "es wurde nicht neu verbunden")
+
+    def test_echte_fehler_werden_nicht_verschluckt(self):
+        conn = dbmod.connect(self.db, backend="libsql")
+        self.addCleanup(conn.close)
+        with self.assertRaises(Exception) as fehler:
+            conn.execute("SELECT * FROM gibtsnicht")
+        self.assertNotIn("stream", str(fehler.exception).lower())
+
+
 class _CursorMitGrossemSchluesselwort:
     """Cursor, der Spaltennamen so meldet wie die gehostete Datenbank.
 
