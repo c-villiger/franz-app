@@ -26,6 +26,7 @@ from vocabtrainer.vocab_file import (
     VocabFileError,
     append_entries,
     load_entries,
+    normalize,
     parse_pair_text,
 )
 
@@ -121,17 +122,34 @@ BAR_COLORS = {
 }
 
 
+def _secret_keys() -> list[str]:
+    """Welche Secrets sind überhaupt hinterlegt? (Nur die Namen, nie die Werte.)"""
+    try:
+        return sorted(st.secrets.keys())
+    except Exception:  # keine Secrets-Datei -> lokaler Betrieb
+        return []
+
+
 def _from_secrets(key: str) -> str:
     """Wert aus `.streamlit/secrets.toml` bzw. den Secrets der Streamlit-Cloud."""
     try:
         return str(st.secrets.get(key, "")).strip()
-    except Exception:  # keine Secrets hinterlegt -> lokaler Betrieb
+    except Exception:
         return ""
 
 
 # Lokal kommt die Konfiguration aus der Umgebung, gehostet aus den Secrets.
 DB_URL = os.environ.get("FRANZ_DB_URL", "").strip() or _from_secrets("db_url")
 DB_TOKEN = os.environ.get("FRANZ_DB_TOKEN", "").strip() or _from_secrets("db_token")
+SECRET_KEYS = _secret_keys()
+
+
+def db_location() -> str:
+    """Kurzform, wo der Fortschritt landet - fürs Anzeigen."""
+    if not DB_URL:
+        return "lokale Datei"
+    host = DB_URL.split("://", 1)[-1].split("/")[0]
+    return f"Turso · {host}"
 
 # Auf einem Server ist das Dateisystem flüchtig: dort dürfen Vokabeln nur über
 # das Repo dazukommen, sonst überlebt die Karte in der Datenbank, ihre Zeile in
@@ -182,6 +200,21 @@ def rate(card_id: int, label: str, cards) -> None:
 
 # ---------------------------------------------------------------- Seitenleiste
 with st.sidebar:
+    # Ganz oben, damit ein stiller Rückfall auf die lokale Datei sofort
+    # auffällt: gehostet wäre der Fortschritt sonst beim nächsten Neustart weg.
+    if DB_URL:
+        st.success(f"Fortschritt: {db_location()}", icon="🗄️")
+    elif SECRET_KEYS:
+        st.error(
+            "Secrets sind hinterlegt, aber **`db_url`** ist nicht dabei – der "
+            "Fortschritt landet gerade in einer lokalen Datei und ist auf einem "
+            f"Server beim nächsten Neustart weg.\n\nGefunden: `{'`, `'.join(SECRET_KEYS)}`"
+            "\n\nErwartet werden genau die Schlüssel `db_url` und `db_token`.",
+            icon="⚠️",
+        )
+    else:
+        st.caption("🗄️ Fortschritt: lokale Datei `data/vocab.db`")
+
     st.header("Einstellungen")
     modes = ["mixed", "fr2de", "de2fr"]
     ss.mode = st.radio(
@@ -198,9 +231,9 @@ with st.sidebar:
     st.subheader("Vokabeln hinzufügen")
     if VOCAB_READONLY:
         st.caption(
-            "Diese Instanz läuft gehostet – neue Vokabeln kommen über das Repo "
-            f"(`{VOCAB_FILE.relative_to(ROOT)}`) dazu. Nach dem Push erscheinen "
-            "sie beim nächsten Deploy automatisch hier."
+            "Neue Vokabeln kommen über das Repo dazu "
+            f"(`{VOCAB_FILE.relative_to(ROOT)}`) – nach dem Push erscheinen sie "
+            "beim nächsten Deploy automatisch hier."
         )
     else:
         with st.form("add_form", clear_on_submit=True):
@@ -219,27 +252,27 @@ with st.sidebar:
             except VocabFileError as exc:
                 st.error(str(exc))
 
-    st.divider()
-    st.subheader("Synchronisieren")
-    st.caption(f"Vokabeldatei: `{VOCAB_FILE.relative_to(ROOT)}`")
-    st.caption(
-        "Fortschritt: gehostete Datenbank" if DB_URL else "Fortschritt: lokale Datei"
-    )
-    if st.button("Datei → Datenbank"):
-        st.success(dbmod.sync_from_file(conn, load_entries()).summary())
-    if not VOCAB_READONLY and st.button("git pull (neue Wörter vom Handy holen)"):
-        try:
-            out = subprocess.run(
-                ["git", "pull", "--ff-only"],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=60,
-            )
-            (st.success if out.returncode == 0 else st.error)(
-                (out.stdout + out.stderr).strip() or "fertig"
-            )
-            if out.returncode == 0:
-                st.info(dbmod.sync_from_file(conn, load_entries()).summary())
-        except Exception as exc:  # pragma: no cover - Umgebungsfehler
-            st.error(f"git pull fehlgeschlagen: {exc}")
+    # Gehostet gleicht sich die Vokabeldatei bei jedem Deploy von selbst ab -
+    # ein Knopf dafür (und erst recht "git pull") hätte dort keine Wirkung.
+    if not VOCAB_READONLY:
+        st.divider()
+        st.subheader("Synchronisieren")
+        st.caption(f"Vokabeldatei: `{VOCAB_FILE.relative_to(ROOT)}`")
+        if st.button("Datei → Datenbank"):
+            st.success(dbmod.sync_from_file(conn, load_entries()).summary())
+        if st.button("git pull (neue Wörter vom Handy holen)"):
+            try:
+                out = subprocess.run(
+                    ["git", "pull", "--ff-only"],
+                    cwd=str(ROOT), capture_output=True, text=True, timeout=60,
+                )
+                (st.success if out.returncode == 0 else st.error)(
+                    (out.stdout + out.stderr).strip() or "fertig"
+                )
+                if out.returncode == 0:
+                    st.info(dbmod.sync_from_file(conn, load_entries()).summary())
+            except Exception as exc:  # pragma: no cover - Umgebungsfehler
+                st.error(f"git pull fehlgeschlagen: {exc}")
 
     st.divider()
     with st.expander("Fortschritt zurücksetzen"):
@@ -253,6 +286,69 @@ with st.sidebar:
     st.subheader("Letzte Bewertungen")
     for row in dbmod.recent_reviews(conn, 8):
         st.caption(f"{LABEL_EMOJI[row['label']]} {row['fr']} → {row['de']}")
+
+
+# ------------------------------------------------------------------- Wörterliste
+def woerterliste(cards, tag_options: list[str] | None = None) -> None:
+    """Durchsuch- und filterbare Übersicht aller Vokabeln."""
+    if not cards:
+        st.info("Noch keine Vokabeln vorhanden.")
+        return
+
+    c_suche, c_label = st.columns([2, 1])
+    with c_suche:
+        query = st.text_input(
+            "Suchen",
+            placeholder="französisch, deutsch oder Tag …",
+            key="list_query",
+        )
+    with c_label:
+        wanted = st.multiselect(
+            "Status",
+            ["unsicher", "mittel", "sicher", "noch nicht gefragt"],
+            key="list_labels",
+        )
+    tags = st.multiselect("Tags", tag_options or [], key="list_tags")
+
+    treffer = list(cards)
+    if query.strip():
+        # Ohne Akzente und Gross-/Kleinschreibung suchen: "cote" findet "côté".
+        needle = normalize(query)
+        treffer = [
+            c for c in treffer
+            if needle in normalize(f"{c.fr} {c.de} {' '.join(c.tags)}")
+        ]
+    if wanted:
+        gewuenscht = {None if w == "noch nicht gefragt" else w for w in wanted}
+        treffer = [c for c in treffer if c.label in gewuenscht]
+    if tags:
+        gesucht = {t.lower() for t in tags}
+        treffer = [c for c in treffer if gesucht & {t.lower() for t in c.tags}]
+
+    st.caption(f"{len(treffer)} von {len(cards)} Vokabeln")
+    if not treffer:
+        st.info("Nichts gefunden.")
+        return
+
+    st.dataframe(
+        [
+            {
+                "": LABEL_EMOJI[c.label],
+                "Französisch": c.fr,
+                "Deutsch": c.de,
+                "Tags": ", ".join(c.tags),
+                "Gefragt": c.times_asked,
+            }
+            for c in sorted(treffer, key=lambda c: normalize(c.fr))
+        ],
+        hide_index=True,
+        width="stretch",
+        height=min(620, 40 + 35 * len(treffer)),
+        column_config={
+            "": st.column_config.TextColumn(width="small"),
+            "Gefragt": st.column_config.NumberColumn(width="small"),
+        },
+    )
 
 
 # -------------------------------------------------------------------- Kopfzeile
@@ -294,12 +390,17 @@ if ss.flash:
     st.toast(ss.flash)
     ss.flash = None
 
+tab_uebung, tab_liste = st.tabs(["🎯 Üben", "📖 Wörterliste"])
+
 # ------------------------------------------------------------------------ Karte
 if not cards:
-    st.info(
-        "Keine Vokabeln vorhanden (oder der Tag-Filter passt auf nichts). "
-        "Füge links in der Seitenleiste welche hinzu."
-    )
+    with tab_uebung:
+        st.info(
+            "Keine Vokabeln vorhanden (oder der Tag-Filter passt auf nichts). "
+            "Der Tag-Filter steht in der Seitenleiste."
+        )
+    with tab_liste:
+        woerterliste(dbmod.all_cards(conn))
     st.stop()
 
 card = dbmod.get_card(conn, ss.current_id) if ss.current_id else None
@@ -313,63 +414,69 @@ if ss.mode != "mixed" and ss.direction != ss.mode:
     ss.direction = ss.mode
     ss.revealed = False
 
-# Ohne Leerzeilen zusammenbauen: Markdown wuerde einen HTML-Block sonst nach
-# der ersten Leerzeile beenden und den Rest als Text ausgeben.
-answer_html = (
-    f'<div class="franz-answer">{escape(card.answer(ss.direction))}</div>'
-    if ss.revealed
-    else ""
-)
-st.markdown(
-    '<div class="franz-card">'
-    f'<div class="franz-direction">{escape(DIRECTION_LABELS[ss.direction])}</div>'
-    f'<div class="franz-prompt">{escape(card.prompt(ss.direction))}</div>'
-    f"{answer_html}</div>",
-    unsafe_allow_html=True,
-)
+with tab_uebung:
+    # Ohne Leerzeilen zusammenbauen: Markdown wuerde einen HTML-Block sonst nach
+    # der ersten Leerzeile beenden und den Rest als Text ausgeben.
+    answer_html = (
+        f'<div class="franz-answer">{escape(card.answer(ss.direction))}</div>'
+        if ss.revealed
+        else ""
+    )
+    st.markdown(
+        '<div class="franz-card">'
+        f'<div class="franz-direction">{escape(DIRECTION_LABELS[ss.direction])}</div>'
+        f'<div class="franz-prompt">{escape(card.prompt(ss.direction))}</div>'
+        f"{answer_html}</div>",
+        unsafe_allow_html=True,
+    )
 
-if not ss.revealed:
-    if wide_button("👁️ Antwort zeigen", key="reveal", shortcut="space"):
-        ss.revealed = True
-        st.rerun()
-else:
-    st.caption("Wie sicher warst du?")
-
-with keyed_container("rating"):
-    b1, b2, b3 = st.columns(3)
-    with b1:
-        if wide_button("🟢 sicher", key="b_sicher", shortcut="1"):
-            rate(card.id, "sicher", cards)
+    if not ss.revealed:
+        if wide_button("👁️ Antwort zeigen", key="reveal", shortcut="space"):
+            ss.revealed = True
             st.rerun()
-    with b2:
-        if wide_button("🟡 mittel", key="b_mittel", shortcut="2"):
-            rate(card.id, "mittel", cards)
+    else:
+        st.caption("Wie sicher warst du?")
+
+    with keyed_container("rating"):
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            if wide_button("🟢 sicher", key="b_sicher", shortcut="1"):
+                rate(card.id, "sicher", cards)
+                st.rerun()
+        with b2:
+            if wide_button("🟡 mittel", key="b_mittel", shortcut="2"):
+                rate(card.id, "mittel", cards)
+                st.rerun()
+        with b3:
+            if wide_button("🔴 unsicher", key="b_unsicher", shortcut="3"):
+                rate(card.id, "unsicher", cards)
+                st.rerun()
+
+    s1, s2 = st.columns([1, 1])
+    with s1:
+        if wide_button("⏭️ Überspringen", key="skip"):
+            dbmod.mark_skipped(conn, card.id)
+            next_card(cards)
             st.rerun()
-    with b3:
-        if wide_button("🔴 unsicher", key="b_unsicher", shortcut="3"):
-            rate(card.id, "unsicher", cards)
+    with s2:
+        if wide_button("🔁 Richtung drehen", key="flip"):
+            ss.direction = "de2fr" if ss.direction == "fr2de" else "fr2de"
+            ss.revealed = False
             st.rerun()
 
-s1, s2 = st.columns([1, 1])
-with s1:
-    if wide_button("⏭️ Überspringen", key="skip"):
-        dbmod.mark_skipped(conn, card.id)
-        next_card(cards)
-        st.rerun()
-with s2:
-    if wide_button("🔁 Richtung drehen", key="flip"):
-        ss.direction = "de2fr" if ss.direction == "fr2de" else "fr2de"
-        ss.revealed = False
-        st.rerun()
+    meta = [
+        f"{LABEL_EMOJI[card.label]} {card.label or 'noch nicht gefragt'}",
+        f"{card.times_asked}× gefragt",
+    ]
+    if card.tags:
+        meta.append(" · ".join(card.tags))
+    note_html = f"<br>{escape(card.note)}" if card.note else ""
+    st.markdown(
+        f'<div class="franz-meta">{escape(" · ".join(meta))}{note_html}</div>',
+        unsafe_allow_html=True,
+    )
 
-meta = [
-    f"{LABEL_EMOJI[card.label]} {card.label or 'noch nicht gefragt'}",
-    f"{card.times_asked}× gefragt",
-]
-if card.tags:
-    meta.append(" · ".join(card.tags))
-note_html = f"<br>{escape(card.note)}" if card.note else ""
-st.markdown(
-    f'<div class="franz-meta">{escape(" · ".join(meta))}{note_html}</div>',
-    unsafe_allow_html=True,
-)
+with tab_liste:
+    # Bewusst alle Karten, nicht die vom Tag-Filter fürs Üben reduzierten:
+    # die Liste hat ihre eigenen Filter.
+    woerterliste(dbmod.all_cards(conn), tag_options=dbmod.all_tags(conn))

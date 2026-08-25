@@ -89,6 +89,11 @@ Dauerhaft am robustesten ist eine feste IP per DHCP-Reservierung im Router.
 
 ## Bedienung
 
+Das Dashboard hat zwei Tabs: **Üben** (die Abfrage) und **Wörterliste**
+(alle Vokabeln durchsuchen und filtern).
+
+### Üben
+
 | Element | Bedeutung |
 |---|---|
 | Zähler oben | Wie viele Vokabeln sind 🟢 sicher, 🟡 mittel, 🔴 unsicher, ⚪️ noch nicht gefragt |
@@ -98,6 +103,14 @@ Dauerhaft am robustesten ist eine feste IP per DHCP-Reservierung im Router.
 | ⏭️ Überspringen | Nächste Karte, ohne zu bewerten |
 | 🔁 Richtung drehen | Diese Karte in der anderen Richtung ansehen |
 | Seitenleiste | Abfragerichtung, Tag-Filter, Vokabeln hinzufügen, `git pull`, Zurücksetzen |
+
+### Wörterliste
+
+Suchfeld (findet Französisch, Deutsch und Tags, ohne Rücksicht auf Akzente und
+Gross-/Kleinschreibung – `cote` findet `à côté de la plaque`), Filter nach
+Status und nach Tags, dazu eine sortierbare Tabelle mit Status, beiden
+Sprachen, Tags und der Zahl der Abfragen. Die Filter dort sind unabhängig vom
+Tag-Filter in der Seitenleiste, der nur die Abfrage einschränkt.
 
 Eine Bewertung lässt sich jederzeit überschreiben – gespeichert wird immer die
 letzte, und jede einzelne Bewertung landet zusätzlich in einer Historie.
@@ -195,6 +208,15 @@ liest die Vokabeln aus dem Repo ein.
   ```
 
   Ohne diese Variablen läuft weiterhin alles lokal und offline.
+
+* **Die Seitenleiste ist kürzer.** Was gehostet keine Wirkung hätte, wird
+  ausgeblendet: das Hinzufügen-Formular, `git pull` und der Knopf
+  „Datei → Datenbank" (der Abgleich läuft dort bei jedem Deploy von selbst).
+
+* **Ganz oben in der Seitenleiste steht, wo der Fortschritt landet.** Fehlt
+  `db_url` in den Secrets, schreibt die App still in eine lokale Datei, die auf
+  einem Server beim Neustart verschwindet – deshalb weist sie ausdrücklich
+  darauf hin, wenn Secrets hinterlegt sind, aber der Schlüssel `db_url` fehlt.
 
 * **Vokabeln kommen nur noch über das Repo.** Gehostet blendet das Dashboard
   das Hinzufügen-Formular aus – und das mit Absicht: eine dort eingetippte
